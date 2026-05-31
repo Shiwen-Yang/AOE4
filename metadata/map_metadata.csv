@@ -1,0 +1,22 @@
+map_id,map,map_type_primary,map_geography_subtype,has_water,water_importance,openness,chokepoint_level,trade_viability,resource_scarcity,map_metadata_confidence,map_metadata_missing
+163361,Dry Arabia,land,flat,false,none,open,low,medium,low,high,0
+2135363,Gorge,land,highland,false,none,semi_open,medium,low,medium,high,0
+9001488,Carmel,land,flat,false,none,semi_open,low,medium,medium,medium,0
+2145747,Sunkenlands,hybrid,wetland,true,medium,semi_open,low,low,medium,high,0
+9002425,Enlightened Horizon,land,highland,false,none,open,low,medium,low,medium,0
+130029,Hill and Dale,land,highland,false,none,semi_open,low,medium,low,high,0
+2141179,Rocky River,hybrid,river,true,medium,semi_open,medium,medium,medium,high,0
+173365,Altai,land,mountain_pass,false,none,closed,high,low,medium,high,0
+127490,High View,land,highland,false,none,semi_open,medium,medium,medium,medium,0
+5015032,Relic River,hybrid,river,true,low,semi_open,medium,medium,medium,medium,0
+187793,Lipany,land,flat,false,none,open,low,medium,low,high,0
+2129132,Cliffside,land,highland,false,none,semi_open,high,low,medium,high,0
+2135364,Canal,hybrid,river,true,high,closed,high,low,medium,high,0
+2143821,Himeyama,land,highland,false,none,semi_open,medium,medium,medium,medium,0
+192989,Archipelago,water,island,true,high,open,low,low,high,high,0
+2122003,Four Lakes,hybrid,pond,true,high,semi_open,medium,medium,medium,high,0
+201804,Boulder Bay,hybrid,pond,true,medium,semi_open,medium,medium,medium,medium,0
+9000266,Lakeside,hybrid,pond,true,medium,semi_open,medium,medium,medium,medium,0
+2059808,Migration,water,island,true,high,open,low,low,high,high,0
+177556,King of the Hill,land,flat,false,none,open,low,medium,medium,medium,0
+2144958,Golden Heights,land,highland,false,none,semi_open,medium,medium,medium,low,0

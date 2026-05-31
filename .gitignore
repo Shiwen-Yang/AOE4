@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data — raw season dumps (large binary files)
+data/
+
+# Database (DuckDB exclusive lock; regenerated from data/)
+*.duckdb
+*.duckdb.wal
+
+# Trained models (large binaries; regenerated via run_train.py)
+models/*.txt
+models/*.ubj
+models/*.json
+
+# Figures and generated reports (regenerated via report commands)
+figures/
+reports/*.md
+reports/*.json
+reports/*/
+
+# Logs and temp files
+*.log
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db

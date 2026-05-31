@@ -1,0 +1,8 @@
+patch,patch_start_at,patch_name,season,is_major_patch,is_balance_patch,is_map_pool_patch,is_hotfix,source_url
+12.2.3327.0,2025-04-07,Season 10 Launch,10,1,1,1,0,https://www.ageofempires.com/news/
+13.0.4178.0,2025-04-08,Season 10 Hotfix 1,10,0,0,0,1,https://www.ageofempires.com/news/
+13.0.4343.0,2025-04-09,Season 10 Update,10,0,1,0,0,https://www.ageofempires.com/news/
+13.1.4420.0,2025-04-22,Season 10 Balance Update,10,0,1,0,0,https://www.ageofempires.com/news/
+13.2.4553.0,2025-05-13,Season 10 May Update,10,0,1,1,0,https://www.ageofempires.com/news/
+14.0.4963.0,2025-06-26,Season 11 Launch,11,1,1,1,0,https://www.ageofempires.com/news/
+14.1.5602.0,2025-07-22,Season 11 July Update,11,0,1,0,0,https://www.ageofempires.com/news/
