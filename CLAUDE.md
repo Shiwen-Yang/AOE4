@@ -8,7 +8,11 @@ AOE4 predicts Age of Empires IV ranked 1v1 match outcomes given two player profi
 
 ## CLI commands
 
+All commands must be run with `src/` on the Python path (packages live under `src/`):
+
 ```bash
+export PYTHONPATH=src   # or prefix each command with PYTHONPATH=src
+
 # One-time setup: ingest seasons (default: all found in data/; --seasons 10,11 for prototype)
 python -m aoe4_predict ingest --seasons 10,11          # skips already-ingested games
 python -m aoe4_predict ingest --seasons 10,11 --force  # re-ingest everything
@@ -77,30 +81,35 @@ No `requirements.txt` or `pyproject.toml` exists. Key packages:
 
 ## Package structure
 
+Source packages live under `src/`. Run everything with `PYTHONPATH=src` from the repo root.
+
 ```
-aoe4_predict/
-  config.py        — paths, constants (PRIOR_STRENGTH, NEW_PLAYER_THRESHOLD, season lists)
-  db.py            — DuckDB connection, DDL (games + participants tables), init_schema(),
-                     ingest_metadata() for map/patch CSV loading
-  ingest.py        — JSON.gz → DuckDB; handles S3 missing mmr/input_type; skip_existing=True
-  data_quality.py  — quality report: missingness, civ coverage, MMR continuity across seasons
-  features.py      — player_stats (window functions), civ_matchup_priors, training_features tables;
-                     get_inference_features() for prediction time
-  features_extra.py — extended feature families P1-P9 (P6/P7 disabled by default);
-                      DISABLED_FAMILIES, FAMILY_FEATURES, extend_training_features()
-  baselines.py     — ConstantBaseline, MMRLogisticBaseline, CivMapBucketBaseline
-  model.py         — LightGBM + XGBoost training/save/load; _temporal_split(),
-                     train_xgb(), _predict_xgb(), load_xgb()
-  tune.py          — Optuna TPE hyperparameter search for LightGBM and XGBoost;
-                     700K-row trial subsampling; saves best_params.json
-  civ_analysis.py  — Skill-stratified civ familiarity analysis; player_civ_extra SQL table;
-                     5 avg-MMR buckets × 4-step ablation; SHAP by bucket; civ_familiarity_report.md
-  evaluate.py      — AUC/LogLoss/Brier/calibration, subgroup breakdown, compare_baselines()
-  predict.py       — predict_match() → structured dict with warnings
-  output.py        — format_prediction() → terminal report string
-  report.py        — analysis_report.md: leakage audit, SHAP, ablation, XGBoost comparison
-  cli.py           — argparse subcommands: ingest, ingest-metadata, quality, train, tune,
-                     analyze-civ, evaluate, report, predict
+src/
+  aoe4_predict/
+    config.py        — paths, constants (PRIOR_STRENGTH, NEW_PLAYER_THRESHOLD, season lists)
+    db.py            — DuckDB connection, DDL (games + participants tables), init_schema(),
+                       ingest_metadata() for map/patch CSV loading
+    ingest.py        — JSON.gz → DuckDB; handles S3 missing mmr/input_type; skip_existing=True
+    data_quality.py  — quality report: missingness, civ coverage, MMR continuity across seasons
+    features.py      — player_stats (window functions), civ_matchup_priors, training_features tables;
+                       get_inference_features() for prediction time
+    features_extra.py — extended feature families P1-P9 (P6/P7 disabled by default);
+                        DISABLED_FAMILIES, FAMILY_FEATURES, extend_training_features()
+    baselines.py     — ConstantBaseline, MMRLogisticBaseline, CivMapBucketBaseline
+    model.py         — LightGBM + XGBoost training/save/load; _temporal_split(),
+                       train_xgb(), _predict_xgb(), load_xgb()
+    tune.py          — Optuna TPE hyperparameter search for LightGBM and XGBoost;
+                       700K-row trial subsampling; saves best_params.json
+    civ_analysis.py  — Skill-stratified civ familiarity analysis; player_civ_extra SQL table;
+                       5 avg-MMR buckets × 4-step ablation; SHAP by bucket; civ_familiarity_report.md
+    evaluate.py      — AUC/LogLoss/Brier/calibration, subgroup breakdown, compare_baselines()
+    predict.py       — predict_match() → structured dict with warnings
+    output.py        — format_prediction() → terminal report string
+    report.py        — analysis_report.md: leakage audit, SHAP, ablation, XGBoost comparison
+    cli.py           — argparse subcommands: ingest, ingest-metadata, quality, train, tune,
+                       analyze-civ, evaluate, report, predict
+  civ_choice/        — predicts which civilization a player will pick
+  ratings_delta/     — models rating-point changes after a match
 ```
 
 ## Architecture
@@ -126,8 +135,8 @@ Derived features (computed in Python, not SQL): smoothed win rates using additiv
 ### Models
 - **Target**: `result` of player A (lower `profile_id`), so `target=1` means the lower-ID player wins
 - **Temporal split** (no random splits): train → valid → test are chronological slices (70/15/15%)
-- **LightGBM**: native categorical features (`civ_a`, `civ_b`, `map`, `patch`, `season` + P6 taxonomy); saved as `models/lgbm_v1.txt` + `lgbm_v1_meta.json`
-- **XGBoost**: same feature set, `enable_categorical=True`; saved as `models/xgb_v1.ubj` + `xgb_v1_meta.json`
+- **LightGBM**: native categorical features (`civ_a`, `civ_b`, `map`, `patch`, `season` + P6 taxonomy); saved as `models/lgbm_s9s10_test_s11.txt` + `lgbm_s9s10_test_s11_meta.json`
+- **XGBoost**: same feature set, `enable_categorical=True`; saved as `models/xgb_s9s10_test_s11.ubj` + `xgb_s9s10_test_s11_meta.json`
 - **Hyperparameter tuning**: Optuna TPE, 50 trials per model, 700K-row subsampled training for each trial; best params saved to `models/{lgbm,xgb}_best_params.json`
 - **Current results on test set** (S10+S11, 196 features, tuned params):
   - Constant 0.5: AUC 0.500

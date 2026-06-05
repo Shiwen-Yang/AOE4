@@ -1,6 +1,9 @@
 """Direct training runner — avoids the -m module path that gets killed by sandbox."""
-import gc, time
+import gc, time, sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
 from aoe4_predict.db import get_conn
 from aoe4_predict.features import build_civ_matchup_priors, build_player_stats, build_training_features
 from aoe4_predict.features_extra import extend_training_features, FAMILY_FEATURES, DISABLED_FAMILIES
