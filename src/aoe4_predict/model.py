@@ -219,6 +219,10 @@ def _predict(model: lgb.Booster, df: pd.DataFrame, feature_cols: list[str]) -> n
     X = df[available].copy()
     for c in cat_feats:
         X[c] = X[c].astype("category")
+    # None values in numeric columns produce object dtype; coerce to float (None → NaN).
+    for c in X.select_dtypes(include="object").columns:
+        if c not in cat_feats:
+            X[c] = pd.to_numeric(X[c], errors="coerce")
     return model.predict(X)
 
 

@@ -67,17 +67,20 @@ SELECT
         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
     ), 0)                                                       AS wins_lifetime_before,
 
-    -- Cumulative games this season BEFORE this match
-    (ROW_NUMBER() OVER (
+    -- Games this season before 00:00:00 on the calendar day of this match.
+    -- ORDER BY DATE + INTERVAL '1 day' PRECEDING gives a hard midnight cutoff:
+    -- frame = rows where date <= match_date - 1 day.  No same-day future info.
+    COALESCE(COUNT(*) OVER (
         PARTITION BY profile_id, season
-        ORDER BY started_at, game_id
-    ) - 1)                                                      AS games_season_before,
+        ORDER BY started_at::DATE
+        RANGE BETWEEN UNBOUNDED PRECEDING AND INTERVAL '1 day' PRECEDING
+    ), 0)                                                       AS games_season_before,
 
-    -- Cumulative wins this season BEFORE this match
+    -- Wins this season before 00:00:00 on the calendar day of this match.
     COALESCE(SUM(result) OVER (
         PARTITION BY profile_id, season
-        ORDER BY started_at, game_id
-        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ORDER BY started_at::DATE
+        RANGE BETWEEN UNBOUNDED PRECEDING AND INTERVAL '1 day' PRECEDING
     ), 0)                                                       AS wins_season_before,
 
     -- Days since previous game (NULL if first game)
@@ -361,6 +364,29 @@ def _get_player_current_stats(profile_id: int, conn) -> dict[str, Any]:
     }
 
 
+def _get_player_season_stats(profile_id: int, season: int, conn) -> dict[str, int]:
+    """Season games and wins before midnight today (matches training day-level window).
+
+    g.started_at < current_date: SQL implicitly casts a bare DATE to that date at
+    00:00:00 when compared to a timestamp, giving the same midnight cutoff as
+    INTERVAL '1 day' PRECEDING in the training SQL.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*), COALESCE(SUM(p.result::INT), 0)
+        FROM participants p
+        JOIN games g ON p.game_id = g.game_id
+        WHERE p.profile_id = ?
+          AND g.season = ?
+          AND g.kind IN ('rm_1v1', 'rm_solo')
+          AND p.result IS NOT NULL
+          AND g.started_at < current_date
+        """,
+        [profile_id, season],
+    ).fetchone()
+    return {"games_season": row[0] or 0, "wins_season": row[1] or 0}
+
+
 def _get_player_civ_stats(profile_id: int, civ: str | None, conn) -> dict[str, Any]:
     if civ is None:
         return {"civ_games": 0, "civ_wins": 0}
@@ -443,6 +469,8 @@ def get_inference_features(
 
     a = _get_player_current_stats(player_a_id, conn)
     b = _get_player_current_stats(player_b_id, conn)
+    season_a = _get_player_season_stats(player_a_id, season, conn)
+    season_b = _get_player_season_stats(player_b_id, season, conn)
     civ_stats_a = _get_player_civ_stats(player_a_id, civ_a, conn)
     civ_stats_b = _get_player_civ_stats(player_b_id, civ_b, conn)
     map_stats_a = _get_player_map_stats(player_a_id, map_name, conn)
@@ -480,8 +508,8 @@ def get_inference_features(
         "rating_a": a["last_rating"],
         "games_lifetime_a": a["games_lifetime"],
         "wins_lifetime_a": a["wins_lifetime"],
-        "games_season_a": 0,
-        "wins_season_a": 0,
+        "games_season_a": season_a["games_season"],
+        "wins_season_a": season_a["wins_season"],
         "days_since_a": days_since(a["last_game_at"]),
         "civ_games_a": civ_stats_a["civ_games"],
         "civ_wins_a": civ_stats_a["civ_wins"],
@@ -492,8 +520,8 @@ def get_inference_features(
         "rating_b": b["last_rating"],
         "games_lifetime_b": b["games_lifetime"],
         "wins_lifetime_b": b["wins_lifetime"],
-        "games_season_b": 0,
-        "wins_season_b": 0,
+        "games_season_b": season_b["games_season"],
+        "wins_season_b": season_b["wins_season"],
         "days_since_b": days_since(b["last_game_at"]),
         "civ_games_b": civ_stats_b["civ_games"],
         "civ_wins_b": civ_stats_b["civ_wins"],
