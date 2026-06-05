@@ -39,6 +39,9 @@ python -m aoe4_predict analyze-civ --add-all-families
 # Generate full analysis report with SHAP and ablation → reports/analysis_report.md
 python -m aoe4_predict report
 
+# Report-only helper scripts live under reports/scripts/
+python reports/scripts/run_report_only.py
+
 # Predict a match (civ and map are optional)
 python -m aoe4_predict predict --player-a 3507399 --player-b 6914972
 python -m aoe4_predict predict --player-a 3507399 --player-b 6914972 --map "Dry Arabia"
@@ -145,7 +148,7 @@ Derived features (computed in Python, not SQL): smoothed win rates using additiv
 - 18 civilizations in S10+S11 (original 10 + 8 DLC); civ matchup priors handle new civs automatically
 - MMR missing: ~6% of participants in S10+S11; rating missing: ~12%
 - `aoe_analysis.ipynb` at the repo root contains exploratory analysis
-- All reports are written to `reports/`: `analysis_report.md`, `civ_familiarity_report.md`, `data_quality_report.json`, `rating_update_report.md`
+- Report artifacts are consolidated under `reports/`: markdown/JSON outputs at the top level, charts under `reports/figures/`, and ad hoc report runners under `reports/scripts/`
 
 ## Known limitations
 

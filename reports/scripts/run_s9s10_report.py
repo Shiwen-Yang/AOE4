@@ -9,6 +9,10 @@ Steps:
 import gc
 import time
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 TRAIN_SEASONS = [9, 10]
 TEST_SEASONS  = [11]

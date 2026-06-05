@@ -30,8 +30,9 @@ models/*.json
 # Figures and generated reports (regenerated via report commands)
 figures/
 reports/*.md
+!reports/README.md
 reports/*.json
-reports/*/
+reports/figures/
 
 # Logs and temp files
 *.log

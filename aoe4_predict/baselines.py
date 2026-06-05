@@ -7,6 +7,8 @@ Baseline models for comparison against LightGBM.
 4. EnhancedLogisticBaseline — logistic regression on skill features + civ/map priors
                               + caller-supplied extra features (e.g. top-N from LightGBM)
 """
+import time
+
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
@@ -509,22 +511,32 @@ class EnhancedL1LogisticBaseline:
         X_va, _ = self._build_X(valid_df, fit=False)
         y_va = valid_df[target_col].values
 
+        n_feats = X_tr.shape[1]
+        print(f"  Fitting {n_feats} features across {len(self.c_grid)} C values "
+              f"({len(X_tr):,} train rows)...", flush=True)
+
         best_C, best_brier, best_model = None, float("inf"), None
         for C in self.c_grid:
-            m = LogisticRegression(penalty="l1", solver="saga", C=C, max_iter=1000, tol=1e-4)
+            t_c = time.time()
+            m = LogisticRegression(penalty="l1", solver="saga", C=C, max_iter=500, tol=1e-3)
             m.fit(X_tr, y_tr)
             p = m.predict_proba(X_va)[:, 1]
             b = float(np.mean((p - y_va) ** 2))
+            converged = not getattr(m, "n_iter_", [500])[0] >= 500
+            print(f"    C={C:<8} val Brier={b:.4f}  iters={m.n_iter_[0]}  "
+                  f"{'(converged)' if converged else '(hit limit)'}  [{time.time()-t_c:.0f}s]",
+                  flush=True)
             if b < best_brier:
                 best_brier, best_C, best_model = b, C, m
 
-        self._model        = best_model
-        self.best_C        = best_C
+        self._model         = best_model
+        self.best_C         = best_C
         self.best_val_brier = best_brier
         n_nz = int(np.sum(best_model.coef_[0] != 0))
         print(
             f"  best C={best_C} | val Brier={best_brier:.4f} | "
-            f"{len(self._all_feature_names)} features | {n_nz} nonzero"
+            f"{n_feats} features | {n_nz} nonzero",
+            flush=True,
         )
         return self
 

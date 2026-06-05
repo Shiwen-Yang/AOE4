@@ -1,6 +1,11 @@
 """Resume: retrain XGB with tuned params, then generate report."""
 import json, gc
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
 from aoe4_predict.db import get_conn
 from aoe4_predict.features_extra import extend_training_features, FAMILY_FEATURES, DISABLED_FAMILIES
 from aoe4_predict.model import train_xgb, XGB_DEFAULT_PARAMS
