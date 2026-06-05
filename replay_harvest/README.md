@@ -3,29 +3,49 @@
 Tools for acquiring raw Age of Empires IV replay files against the existing
 `aoe4.duckdb` match warehouse.
 
-Initialize tables:
+The harvester uses existing `games` and `participants` rows as the metadata
+source of truth. It adds replay-specific bookkeeping tables, labels candidate
+matches, downloads raw replay files slowly, and records parser status after
+running the replay parser.
+
+Raw files are written under `data/replays/raw/YYYY-MM-DD/`. Parsed files are
+written under `data/replays/parsed/<game_id>/`. DuckDB remains the source of
+truth for download and parse status.
+
+## Commands
+
+Initialize replay bookkeeping tables:
 
 ```bash
 python -m replay_harvest init-schema
 ```
 
-Label the balanced RM 1v1 sample:
+Label a balanced RM 1v1 sample by rating bucket:
 
 ```bash
 python -m replay_harvest label-balanced --limit 10000
 ```
 
-Label complete coverage for the current top 100 canonical AoE4World players:
+Label complete coverage for the current top 100 canonical AoE4World players,
+including linked alternate accounts where AoE4World exposes them:
 
 ```bash
 python -m replay_harvest label-top100
 ```
 
-Download slowly:
+Show labeled candidate counts:
+
+```bash
+python -m replay_harvest candidates
+```
+
+Download labeled replays slowly:
 
 ```bash
 python -m replay_harvest download --group balanced_10k --limit 1000 --sleep-min 15 --sleep-max 30
 ```
+
+Use `--group top100_complete` to download the top-player coverage set.
 
 Parse downloaded files:
 
@@ -33,5 +53,16 @@ Parse downloaded files:
 python -m replay_harvest parse-downloaded --group balanced_10k --limit 100
 ```
 
-Raw files are written under `data/replays/raw/YYYY-MM-DD/`. DuckDB remains the
-source of truth for download and parse status.
+Write sample/download reports:
+
+```bash
+python -m replay_harvest report
+```
+
+Reports are written to `data/replays/reports/`.
+
+## Safety Defaults
+
+Downloads run as a single worker. The default command examples use 15-30 seconds
+between replay requests. Failed downloads are recorded in `replay_downloads`
+with `last_error`, and successful downloads are deduplicated by `game_id`.
