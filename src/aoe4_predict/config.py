@@ -1,6 +1,6 @@
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = BASE_DIR / "aoe4.duckdb"
 MODEL_DIR = BASE_DIR / "models"

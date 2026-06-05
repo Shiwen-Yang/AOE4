@@ -939,6 +939,164 @@ def extend_training_features(
     return df
 
 
+# ── inference-time extended features (P1-P5, P8-P9) ──────────────────────────
+
+def get_extended_inference_features(
+    player_a_id: int,
+    player_b_id: int,
+    civ_a: str | None,
+    civ_b: str | None,
+    base_feat: dict,
+    conn,
+) -> dict[str, Any]:
+    """
+    Compute P1-P5, P8-P9 extended features for a single match prediction.
+
+    Queries participants+games directly — no dependency on player_stats_ext or
+    h2h_priors being pre-built.  Mirrors the window semantics used during training:
+      - Time-window counts (P1, P9) are computed relative to now().
+      - Lag-based features (P2, P3) use the N most recent games in chronological
+        order, matching LAG(mmr, N) / ROWS BETWEEN N PRECEDING AND 1 PRECEDING.
+      - Lifetime duration stats (P4) cover all recorded games.
+
+    Returns a dict of additional features; caller merges with base_feat.
+    The player_a / player_b assignment in base_feat must already follow the
+    profile_id_a < profile_id_b convention.
+    """
+    import datetime
+
+    ext: dict[str, Any] = {}
+    pid_lo = min(player_a_id, player_b_id)
+    pid_hi = max(player_a_id, player_b_id)
+    lo_is_a = player_a_id == pid_lo
+
+    for side, pid, civ in (("a", player_a_id, civ_a), ("b", player_b_id, civ_b)):
+        # ── One aggregation query covers P1 (civ windows), P4 (lifetime duration
+        #    stats), and P9 (activity windows).  civ=None causes all civ FILTER
+        #    conditions to evaluate as NULL → 0, which is the correct default.
+        agg = conn.execute("""
+            SELECT
+                AVG(g.duration)                                                                     AS avg_dur_life,
+                AVG(g.duration) FILTER (WHERE p.civilization = $civ)                               AS civ_avg_dur,
+                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900)         AS short_games,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900),  0) AS short_wins,
+                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800)        AS long_games,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800),  0) AS long_wins,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '7 days')  AS civ_games_7d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '7 days'),  0) AS civ_wins_7d,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '30 days') AS civ_games_30d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '30 days'), 0) AS civ_wins_30d,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '60 days') AS civ_games_60d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '60 days'), 0) AS civ_wins_60d,
+                MAX(g.started_at) FILTER (WHERE p.civilization = $civ)                             AS last_civ_game_at,
+                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '7 days')           AS act_games_7d,
+                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '14 days')          AS act_games_14d,
+                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '30 days')          AS act_games_30d,
+                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '60 days')          AS act_games_60d
+            FROM participants p
+            JOIN games g ON p.game_id = g.game_id
+            WHERE p.profile_id = $pid
+              AND g.kind IN ('rm_1v1', 'rm_solo')
+              AND p.result IS NOT NULL
+              AND g.started_at IS NOT NULL
+        """, {"pid": pid, "civ": civ}).fetchone()
+
+        ext[f"avg_dur_life_{side}"]   = agg[0]
+        ext[f"civ_avg_dur_{side}"]    = agg[1]
+        ext[f"short_games_{side}"]    = agg[2] or 0
+        ext[f"short_wins_{side}"]     = agg[3] or 0
+        ext[f"long_games_{side}"]     = agg[4] or 0
+        ext[f"long_wins_{side}"]      = agg[5] or 0
+        ext[f"civ_games_7d_{side}"]   = agg[6] or 0
+        ext[f"civ_wins_7d_{side}"]    = agg[7] or 0
+        ext[f"civ_games_30d_{side}"]  = agg[8] or 0
+        ext[f"civ_wins_30d_{side}"]   = agg[9] or 0
+        ext[f"civ_games_60d_{side}"]  = agg[10] or 0
+        ext[f"civ_wins_60d_{side}"]   = agg[11] or 0
+        ext[f"act_games_7d_{side}"]   = agg[13] or 0
+        ext[f"act_games_14d_{side}"]  = agg[14] or 0
+        ext[f"act_games_30d_{side}"]  = agg[15] or 0
+        ext[f"act_games_60d_{side}"]  = agg[16] or 0
+
+        last_civ_ts = agg[12]
+        if last_civ_ts is not None:
+            ts = last_civ_ts
+            if hasattr(ts, "to_pydatetime"):
+                ts = ts.to_pydatetime()
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+            ext[f"days_since_civ_{side}"] = (datetime.datetime.utcnow() - ts).days
+        else:
+            ext[f"days_since_civ_{side}"] = None
+
+        # ── Last 20 games covers P2 (MMR lags), P3 (recent form), P4 (avg_dur_20).
+        #    Order is descending so index 0 = most recent game.
+        #    mmr_lag{N} at inference = mmr[N-1] in this list (0-indexed):
+        #      training LAG(mmr, N) at row G+1 = mmr at row (G+1-N) = mmr[G-(N-1)]
+        #      which is the N-th element back from the most recent game → index N-1.
+        recent = conn.execute("""
+            SELECT p.mmr, p.result::INT, g.duration
+            FROM participants p
+            JOIN games g ON p.game_id = g.game_id
+            WHERE p.profile_id = ?
+              AND g.kind IN ('rm_1v1', 'rm_solo')
+              AND p.result IS NOT NULL
+              AND g.started_at IS NOT NULL
+            ORDER BY g.started_at DESC, g.game_id DESC
+            LIMIT 20
+        """, [pid]).fetchall()
+
+        # P2: MMR lags and rolling stats (keep nulls to match LAG behaviour)
+        mmr_seq = [r[0] for r in recent]
+        for n in (3, 5, 10, 20):
+            ext[f"mmr_lag{n}_{side}"] = mmr_seq[n - 1] if len(mmr_seq) >= n else None
+        mmrs_10 = [m for m in mmr_seq[:10] if m is not None]
+        mmrs_20 = [m for m in mmr_seq[:20] if m is not None]
+        ext[f"mmr_std_10_{side}"] = float(np.std(mmrs_10, ddof=1)) if len(mmrs_10) >= 2 else None
+        ext[f"mmr_std_20_{side}"] = float(np.std(mmrs_20, ddof=1)) if len(mmrs_20) >= 2 else None
+
+        # P3: recent form (results are always non-null — filtered above)
+        results = [r[1] for r in recent]
+        for n in (5, 10, 20):
+            ext[f"recent_n_{n}_{side}"] = min(n, len(results))
+            ext[f"recent_w_{n}_{side}"] = int(sum(results[:n]))
+
+        # P4: avg_dur_20
+        dur20 = [r[2] for r in recent if r[2] is not None]
+        ext[f"avg_dur_20_{side}"] = float(np.mean(dur20)) if dur20 else None
+
+    # ── P5: head-to-head record between the exact pair ────────────────────────
+    h2h = conn.execute("""
+        SELECT COUNT(*), COALESCE(SUM(p_lo.result::INT), 0)
+        FROM participants p_lo
+        JOIN participants p_hi ON p_lo.game_id = p_hi.game_id
+        JOIN games g ON p_lo.game_id = g.game_id
+        WHERE p_lo.profile_id = ? AND p_hi.profile_id = ?
+          AND g.kind IN ('rm_1v1', 'rm_solo')
+          AND p_lo.result IS NOT NULL
+    """, [pid_lo, pid_hi]).fetchone()
+    h2h_games    = h2h[0] or 0
+    h2h_wins_lo  = h2h[1] or 0
+    ext["h2h_games"]  = h2h_games
+    ext["h2h_wins_a"] = h2h_wins_lo if lo_is_a else (h2h_games - h2h_wins_lo)
+
+    # ── Apply Python-level derivations via existing _pN_derived functions ─────
+    # P8 features are derived entirely from base_feat columns (no new queries).
+    merged = {**base_feat, **ext}
+    df = pd.DataFrame([merged])
+    df = _p1_derived(df)
+    df = _p2_derived(df)
+    df = _p3_derived(df)
+    df = _p4_derived(df)
+    df = _p5_derived(df)
+    df = _p8_derived(df)
+    df = _p9_derived(df)
+
+    row = df.iloc[0].to_dict()
+    # Return only the keys that aren't already in base_feat (avoids double-writing)
+    return {k: v for k, v in row.items() if k not in base_feat}
+
+
 # ── feature name lists (for model.py and ablation) ───────────────────────────
 
 P1_FEATURES = [

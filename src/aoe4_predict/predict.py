@@ -8,6 +8,7 @@ from typing import Any
 
 from .db import get_conn
 from .features import get_inference_features
+from .features_extra import get_extended_inference_features
 from .model import load_model, predict_from_features
 
 
@@ -48,6 +49,16 @@ def predict_match(
         map_name=map_name,
         conn=conn,
     )
+
+    ext = get_extended_inference_features(
+        player_a_id=player_a_id,
+        player_b_id=player_b_id,
+        civ_a=civ_a,
+        civ_b=civ_b,
+        base_feat=feat,
+        conn=conn,
+    )
+    feat.update(ext)
 
     feature_cols = meta["feature_cols"]
     win_prob_a = predict_from_features(model, feat, feature_cols)

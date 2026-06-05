@@ -149,6 +149,10 @@ Derived features (computed in Python, not SQL): smoothed win rates using additiv
 ### Inference
 `predict_match(player_a_id, player_b_id, civ_a, civ_b, map_name)` queries the DB for current player stats, constructs the feature dict, and scores with the saved model. Returns context level ("id_only" / "map_known" / "civ_known" / "full_context") and reliability warnings for sparse data.
 
+Two-phase feature construction at inference time:
+1. `get_inference_features()` (`features.py`) — base ~56 features: MMR, lifetime win rates, per-civ/map aggregates, civ matchup priors
+2. `get_extended_inference_features()` (`features_extra.py`) — P1-P5, P8-P9 extended features queried directly from `participants` + `games` tables (no dependency on pre-built `player_stats_ext` or `h2h_priors` tables). Time-window features (P1, P9) use `now()` as the reference point; lag features (P2) and recent-form (P3) use the N most-recent games.
+
 ## Data notes
 
 - Data lives in `data/games_rm_1v1_s{3..11}.json.gz` (9 seasons, ~11.3M total games)
