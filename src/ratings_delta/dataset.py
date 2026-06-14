@@ -154,6 +154,7 @@ SELECT
     m.observed_hidden_mmr_delta,
     tf.games_lifetime_before,
     tf.games_season_before                                 AS games_this_season_before,
+    otf.games_season_before                                AS opponent_games_this_season_before,
     tf.days_since_last_game,
     sf.current_streak,
     tf.recent_wr_10,
@@ -169,6 +170,9 @@ JOIN opponent o
 JOIN temporal_feats tf
     ON tf.game_id = m.game_id
    AND tf.profile_id = m.profile_id
+JOIN temporal_feats otf
+    ON otf.game_id = m.game_id
+   AND otf.profile_id = o.opponent_profile_id
 JOIN streak_feats sf
     ON sf.game_id = m.game_id
    AND sf.profile_id = m.profile_id

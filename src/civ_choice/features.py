@@ -6,12 +6,12 @@ All operations are pandas groupby/vectorized — no extra DB access.
 import numpy as np
 import pandas as pd
 
+N_CIV_OPTIONS = 19  # 18 concrete civs + random_civ option
 SMOOTHING = 5  # additive smoothing for win rates and pick shares
 
 # ── Feature name lists ────────────────────────────────────────────────────────
 
 CANDIDATE_FEATURES = [
-    "cand_games_lifetime",
     "cand_pick_share_lifetime",
     "cand_games_30d",
     "cand_pick_share_30d",
@@ -27,6 +27,22 @@ CANDIDATE_FEATURES = [
     "candidate_is_last_civ",
     "candidate_was_played_last_3_games",
     "candidate_was_played_last_5_games",
+    "candidate_played_last_1_game",
+    "candidate_played_last_2_games",
+    "candidate_games_last_5_games",
+    "candidate_games_last_10_games",
+    "candidate_last_played_position",
+    "candidate_is_most_picked_last_20_games",
+    "candidate_is_2nd_most_picked_last_20_games",
+    "candidate_is_3rd_most_picked_last_20_games",
+    "cand_pick_share_last_20_games",
+    "cand_recent_vs_lifetime_pick_share_delta",
+    "candidate_current_streak_len",
+    "candidate_breaks_current_streak",
+    "cand_games_last_20_same_map",
+    "cand_pick_share_last_20_same_map",
+    "cand_global_pr_patch_mmr_bucket",
+    "cand_global_pr_map_patch",
     "candidate_is_lifetime_main",
     "candidate_is_recent_30d_main",
     "candidate_is_patch_main",
@@ -37,11 +53,9 @@ CANDIDATE_FEATURES = [
     "candidate_is_in_pool_30d",
     "cand_global_pr_prev_season",
     "cand_global_pr_prev_patch",
-    "cand_global_pr_this_season",
 ]
 
 PLAYER_FEATURES = [
-    "player_mmr",
     "player_rating",
     "player_games_lifetime",
     "player_games_30d",
@@ -50,10 +64,12 @@ PLAYER_FEATURES = [
     "num_civs_played_lifetime",
     "num_civs_played_30d",
     "num_civs_played_this_patch",
-    "civ_pool_entropy_lifetime",
     "civ_pool_entropy_30d",
+    "player_current_streak_len",
+    "recent_civ_switch_count_last_10_games",
+    "recent_unique_civs_last_10_games",
+    "recent_entropy_last_10_games",
     "main_civ_share_lifetime",
-    "main_civ_share_30d",
 ]
 
 CONTEXT_FEATURES = ["candidate_civ", "map", "patch", "season"]
@@ -70,11 +86,32 @@ def _entropy(shares: np.ndarray) -> float:
 def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add all model-ready features to the training matrix in-place."""
     df = df.copy()
+    defaults = {
+        "cand_games_last_1_games": 0,
+        "cand_games_last_2_games": 0,
+        "cand_games_last_3_games": 0,
+        "cand_games_last_5_games": 0,
+        "cand_games_last_10_games": 0,
+        "cand_games_last_20_games": 0,
+        "candidate_current_streak_len": 0,
+        "player_current_streak_len": 0,
+        "candidate_last_played_position": 21,
+        "recent_civ_switch_count_last_10_games": 0,
+        "recent_unique_civs_last_10_games": 0,
+        "recent_entropy_last_10_games": 0.0,
+        "cand_games_last_20_same_map": 0,
+        "player_games_last_20_same_map": 0,
+        "cand_global_pr_patch_mmr_bucket": 1.0 / N_CIV_OPTIONS,
+        "cand_global_pr_map_patch": 1.0 / N_CIV_OPTIONS,
+    }
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
     grp = df.groupby(["game_id", "profile_id"])
 
     # ── Pick shares (smoothed) ────────────────────────────────────────────
     def _smooth_share(games, total, smooth=SMOOTHING):
-        return (games + smooth * (1.0 / 18)) / (total + smooth)
+        return (games + smooth * (1.0 / N_CIV_OPTIONS)) / (total + smooth)
 
     df["cand_pick_share_lifetime"] = _smooth_share(
         df["cand_games_lifetime"], df["player_games_lifetime"]
@@ -88,6 +125,20 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     df["cand_pick_share_this_map"] = _smooth_share(
         df["cand_games_this_map"], df["player_games_this_map"]
     )
+    last20_total = grp["cand_games_last_20_games"].transform("sum")
+    df["cand_pick_share_last_20_games"] = np.where(
+        last20_total > 0,
+        df["cand_games_last_20_games"] / last20_total,
+        0.0,
+    )
+    df["cand_recent_vs_lifetime_pick_share_delta"] = (
+        df["cand_pick_share_last_20_games"] - df["cand_pick_share_lifetime"]
+    )
+    df["cand_pick_share_last_20_same_map"] = np.where(
+        df["player_games_last_20_same_map"] > 0,
+        df["cand_games_last_20_same_map"] / df["player_games_last_20_same_map"],
+        0.0,
+    )
 
     # ── Win rates (smoothed) ──────────────────────────────────────────────
     def _smooth_wr(wins, games, smooth=SMOOTHING):
@@ -99,18 +150,23 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     df["cand_wr_this_map"] = _smooth_wr(df["cand_wins_this_map"], df["cand_games_this_map"])
 
     # ── Boolean flags ─────────────────────────────────────────────────────
-    df["candidate_is_last_civ"] = (
-        df["candidate_civ"] == df["prev_civ"]
-    ).astype(int)
+    candidate_civ_values = df["candidate_civ"].astype(object).astype(str)
+    prev_civ_values = df["prev_civ"].astype(object).fillna("").astype(str)
+    df["candidate_is_last_civ"] = (candidate_civ_values == prev_civ_values).astype(int)
     df["candidate_is_in_pool_lifetime"] = (df["cand_games_lifetime"] > 0).astype(int)
     df["candidate_is_in_pool_30d"] = (df["cand_games_30d"] > 0).astype(int)
 
-    # ── Last-N-game flags (from prev_civ and game-level LAG data) ─────────
-    # Approximation using 30d counts as proxy for last-3/5 games
-    # A civ played ≥1 time in last 30d implies it was played "recently";
-    # we don't have exact game sequence here, so use a threshold heuristic.
-    df["candidate_was_played_last_3_games"] = (df["cand_games_30d"] >= 1).astype(int)
-    df["candidate_was_played_last_5_games"] = (df["cand_games_30d"] >= 1).astype(int)
+    # ── Exact recent sequence flags ───────────────────────────────────────
+    df["candidate_played_last_1_game"] = (df["cand_games_last_1_games"] > 0).astype(int)
+    df["candidate_played_last_2_games"] = (df["cand_games_last_2_games"] > 0).astype(int)
+    df["candidate_was_played_last_3_games"] = (df["cand_games_last_3_games"] > 0).astype(int)
+    df["candidate_was_played_last_5_games"] = (df["cand_games_last_5_games"] > 0).astype(int)
+    df["candidate_games_last_5_games"] = df["cand_games_last_5_games"]
+    df["candidate_games_last_10_games"] = df["cand_games_last_10_games"]
+    df["candidate_breaks_current_streak"] = (
+        (df["player_current_streak_len"] > 0)
+        & (candidate_civ_values != prev_civ_values)
+    ).astype(int)
 
     # ── Within-group ranks and main-civ flags ─────────────────────────────
     df["candidate_civ_rank_lifetime"] = (
@@ -128,10 +184,27 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
         .rank(method="dense", ascending=False)
         .astype(int)
     )
+    df["candidate_civ_rank_last_20_games"] = (
+        grp["cand_games_last_20_games"]
+        .rank(method="dense", ascending=False)
+        .astype(int)
+    )
 
     df["candidate_is_lifetime_main"] = (df["candidate_civ_rank_lifetime"] == 1).astype(int)
     df["candidate_is_recent_30d_main"] = (df["candidate_civ_rank_30d"] == 1).astype(int)
     df["candidate_is_patch_main"] = (df["candidate_civ_rank_this_patch"] == 1).astype(int)
+    df["candidate_is_most_picked_last_20_games"] = (
+        (df["cand_games_last_20_games"] > 0)
+        & (df["candidate_civ_rank_last_20_games"] == 1)
+    ).astype(int)
+    df["candidate_is_2nd_most_picked_last_20_games"] = (
+        (df["cand_games_last_20_games"] > 0)
+        & (df["candidate_civ_rank_last_20_games"] == 2)
+    ).astype(int)
+    df["candidate_is_3rd_most_picked_last_20_games"] = (
+        (df["cand_games_last_20_games"] > 0)
+        & (df["candidate_civ_rank_last_20_games"] == 3)
+    ).astype(int)
 
     # ── Player-level entropy and pool stats ───────────────────────────────
     def _group_entropy_and_pool(sub):

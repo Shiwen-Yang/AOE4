@@ -7,23 +7,19 @@ Train/val/test are all within S9+S10 (70/15/15 temporal split).
 S11 is never loaded.
 
 Run:
-    python reports/scripts/run_l1_ablation.py [--db path/to/aoe4.duckdb]
+    python scripts/experiments/run_l1_ablation.py [--db path/to/aoe4.duckdb]
 
 Output:
-    reports/l1_ablation_s9s10.md
+    reports/generated/l1_ablation_s9s10.md
 """
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
-
 TRAIN_SEASONS = [9, 10]
-REPORT_PATH   = Path("reports/l1_ablation_s9s10.md")
+REPORT_PATH   = Path("reports/generated/l1_ablation_s9s10.md")
 PRIOR_GAMES   = 5  # smoothing prior for day-level win rates
 
 

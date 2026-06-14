@@ -93,13 +93,30 @@ def _insert_batch(conn, games_rows: list[dict], participants_rows: list[dict]) -
         df_g["started_at"] = pd.to_datetime(df_g["started_at"], utc=True).dt.tz_localize(None)
         df_g["finished_at"] = pd.to_datetime(df_g["finished_at"], utc=True).dt.tz_localize(None)
         conn.register("_batch_games", df_g)
-        conn.execute("INSERT OR IGNORE INTO games SELECT * FROM _batch_games")
+        conn.execute("""
+            INSERT INTO games
+            SELECT bg.* FROM _batch_games bg
+            WHERE NOT EXISTS (SELECT 1 FROM games g WHERE g.game_id = bg.game_id)
+        """)
         conn.unregister("_batch_games")
 
     if participants_rows:
         df_p = pd.DataFrame(participants_rows)
         conn.register("_batch_parts", df_p)
-        conn.execute("INSERT OR IGNORE INTO participants SELECT * FROM _batch_parts")
+        conn.execute("""
+            INSERT INTO participants
+                (game_id, profile_id, result, civilization, civilization_randomized,
+                 rating, rating_diff, mmr, mmr_diff, input_type)
+            SELECT
+                bp.game_id, bp.profile_id, bp.result, bp.civilization,
+                bp.civilization_randomized, bp.rating, bp.rating_diff,
+                bp.mmr, bp.mmr_diff, bp.input_type
+            FROM _batch_parts bp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM participants p
+                WHERE p.game_id = bp.game_id AND p.profile_id = bp.profile_id
+            )
+        """)
         conn.unregister("_batch_parts")
 
 

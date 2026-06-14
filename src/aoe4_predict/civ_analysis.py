@@ -27,8 +27,9 @@ import pandas as pd
 from .config import PRIOR_STRENGTH, GLOBAL_WR_PRIOR
 from .db import table_exists
 
-REPORT_PATH = Path(__file__).parent.parent / "reports" / "civ_familiarity_report.md"
-FIGURES_DIR = Path(__file__).parent.parent / "reports" / "figures"
+BASE_DIR = Path(__file__).resolve().parents[2]
+REPORT_PATH = BASE_DIR / "reports" / "generated" / "civ_familiarity_report.md"
+FIGURES_DIR = BASE_DIR / "reports" / "figures"
 
 # ── SQL: per-player per-game civ-extra features ────────────────────────────────
 

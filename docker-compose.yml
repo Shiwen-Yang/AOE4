@@ -1,0 +1,18 @@
+services:
+  aoe4-backend:
+    build:
+      context: .
+    image: aoe4-backend:local
+    ports:
+      - "8000:8000"
+    environment:
+      AOE4_DB_PATH: /artifacts/aoe4.duckdb
+      AOE4_MODEL_PATH: /artifacts/models/aoe4_predict/lgbm_s10s11s12.txt
+      AOE4_MODEL_META_PATH: /artifacts/models/aoe4_predict/lgbm_s10s11s12_meta.json
+      AOE4_MODEL_VERSION: lgbm_s10s11s12
+      AOE4_DELTA_MODEL_PATH: /artifacts/models/ratings_delta/lgbm_delta.txt
+      AOE4_DELTA_PARAMETRIC_PATH: /artifacts/models/p3_parametric.json
+      AOE4_CORS_ORIGINS: http://localhost:5173
+    volumes:
+      - ./aoe4.duckdb:/artifacts/aoe4.duckdb:ro
+      - ./models:/artifacts/models:ro

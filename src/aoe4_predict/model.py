@@ -53,7 +53,7 @@ DEFAULT_PARAMS = {
     "objective": "binary",
     "metric": "auc",
     "boosting": "gbdt",
-    # Optuna-tuned hyperparameters (from models/lgbm_best_params.json)
+    # Optuna-tuned hyperparameters (from models/aoe4_predict/lgbm_best_params.json)
     "num_leaves": 167,
     "min_child_samples": 126,
     "learning_rate": 0.028613301027563053,
@@ -67,6 +67,85 @@ DEFAULT_PARAMS = {
     "is_unbalance": False,
     "random_state": 42,
 }
+
+
+def make_slot_swapped_rows(df: pd.DataFrame, target_col: str = "target") -> pd.DataFrame:
+    """
+    Return a copy of df with player A/B slots swapped.
+
+    The outcome target is inverted, directional difference features are negated,
+    and directional civ-matchup priors are flipped so the swapped row means
+    "new Player A wins" in the same feature schema.
+    """
+    swapped = df.copy()
+
+    for col in list(df.columns):
+        if not col.endswith("_a"):
+            continue
+        stem = col[:-2]
+        other = f"{stem}_b"
+        if other in df.columns:
+            swapped[col] = df[other]
+            swapped[other] = df[col]
+
+    if target_col in swapped.columns:
+        swapped[target_col] = 1 - df[target_col]
+
+    for col in (
+        "mmr_diff", "rating_diff", "skill_diff", "games_diff", "wr_diff",
+        # Career-block cross-player diffs (historic-integration experiment).
+        "career_wr_diff", "career_games_diff", "peak_mmr_diff", "career_avg_mmr_diff",
+        # Window-temporal cross-player diffs (aoe4world-page-only experiment).
+        "window_span_days_diff", "games_per_day_window_diff",
+        "gap_max_window_diff", "wt_act_30d_diff",
+    ):
+        if col in swapped.columns:
+            swapped[col] = -df[col]
+
+    if {"prior_matchup_games", "prior_matchup_wins"}.issubset(swapped.columns):
+        swapped["prior_matchup_wins"] = df["prior_matchup_games"] - df["prior_matchup_wins"]
+    if "prior_matchup_wr_a" in swapped.columns:
+        swapped["prior_matchup_wr_a"] = 1 - df["prior_matchup_wr_a"]
+
+    return swapped
+
+
+def augment_with_slot_swaps(df: pd.DataFrame, target_col: str = "target") -> pd.DataFrame:
+    """Double a training frame with slot-swapped counterparts."""
+    original = df
+    swapped = make_slot_swapped_rows(original, target_col=target_col)
+    augmented = pd.concat(
+        [original, swapped],
+        ignore_index=True,
+        copy=False,
+    )
+    del original, swapped
+    return augmented
+
+
+def randomize_train_slots(
+    df: pd.DataFrame,
+    target_col: str = "target",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Keep the train row count fixed while randomizing slot orientation.
+
+    Roughly half the rows are replaced by their slot-swapped counterparts.
+    This approximates the symmetry benefit of augmentation without doubling
+    the training frame in memory.
+    """
+    rng = np.random.default_rng(random_state)
+    swap_mask = rng.random(len(df)) < 0.5
+    if not swap_mask.any():
+        return df
+
+    randomized = df.copy()
+    to_swap = randomized.loc[swap_mask].copy()
+    swapped = make_slot_swapped_rows(to_swap, target_col=target_col)
+    randomized.loc[swap_mask, swapped.columns] = swapped
+    del to_swap, swapped
+    return randomized
 
 
 def _temporal_split(
@@ -117,6 +196,8 @@ def train(
     valid_frac: float = VALID_FRAC,
     test_frac: float = TEST_FRAC,
     test_seasons: list | None = None,
+    symmetric_slots: bool = False,
+    randomize_train_slots_flag: bool = False,
 ) -> tuple[lgb.Booster, dict]:
     """
     Train LightGBM on a temporal split. Returns (model, meta).
@@ -162,6 +243,24 @@ def train(
         del df; gc.collect()
         print(f"  Temporal split:")
 
+    if symmetric_slots and randomize_train_slots_flag:
+        raise ValueError("Choose either symmetric slot augmentation or fixed-size train-slot randomization, not both.")
+
+    if symmetric_slots:
+        print("  Augmenting train split with slot-swapped rows...")
+        train_df_original = train_df
+        train_df = augment_with_slot_swaps(train_df_original, target_col=target_col)
+        del train_df_original
+        gc.collect()
+        print(f"  Symmetric train rows: {len(train_df):,}")
+    elif randomize_train_slots_flag:
+        print("  Randomizing slot orientation on roughly half the train rows...")
+        train_df_original = train_df
+        train_df = randomize_train_slots(train_df_original, target_col=target_col, random_state=42)
+        del train_df_original
+        gc.collect()
+        print(f"  Train rows after slot randomization: {len(train_df):,}")
+
     print(f"    Train:  {len(train_df):>8,}  ({train_df['started_at'].min()} → {train_df['started_at'].max()})")
     print(f"    Valid:  {len(valid_df):>8,}  ({valid_df['started_at'].min()} → {valid_df['started_at'].max()})")
     print(f"    Test:   {len(test_df):>8,}  ({test_df['started_at'].min()} → {test_df['started_at'].max()})")
@@ -197,6 +296,8 @@ def train(
             "train_end": str(train_df["started_at"].max()),
             "valid_end": str(valid_df["started_at"].max()),
             "test_seasons": test_seasons,
+            "symmetric_slots": symmetric_slots,
+            "randomize_train_slots": randomize_train_slots_flag,
         },
         "metrics": {
             "train": evaluate(train_df[target_col].values, _predict(model, train_df, available_features)),

@@ -1,0 +1,223 @@
+ar_layers: &id001 []
+config_ar: !!python/object:neuralprophet.configure_components.AutoregRession
+  ar_layers: *id001
+  ar_reg: null
+  n_lags: 0
+  reg_lambda: null
+config_events: null
+config_holidays: null
+config_lagged_regressors: !!python/object:neuralprophet.configure_components.LaggedRegressors
+  layers: []
+  regressors: null
+config_model: !!python/object:neuralprophet.configure.Model
+  max_lags: 0
+  n_forecasts: 1
+  prediction_frequency: null
+  quantiles:
+  - 0.5
+config_normalization: !!python/object:neuralprophet.configure.Normalization
+  global_data_params: !!python/object/apply:collections.OrderedDict
+  - - - ds
+      - &id003 !!python/object:neuralprophet.df_utils.ShiftScale
+        scale: !!python/object/apply:pandas._libs.tslibs.timedeltas._timedelta_unpickle
+        - 2073300000000000
+        - 10
+        shift: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+        - 1756684800000000000
+        - null
+        - null
+        - 10
+    - - y
+      - !!python/object:neuralprophet.df_utils.ShiftScale
+        scale: !!python/object/apply:numpy.core.multiarray.scalar
+        - &id002 !!python/object/apply:numpy.dtype
+          args:
+          - f8
+          - false
+          - true
+          state: !!python/tuple
+          - 3
+          - <
+          - null
+          - null
+          - null
+          - -1
+          - -1
+          - 0
+        - !!binary |
+          AAAAkPP/RkE=
+        shift: !!python/object/apply:numpy.core.multiarray.scalar
+        - *id002
+        - !!binary |
+          AAAAFvg6p0E=
+  global_normalization: true
+  global_time_normalization: true
+  local_data_params: !!python/object/apply:collections.OrderedDict
+  - - - __df__
+      - !!python/object/apply:collections.OrderedDict
+        - - - ds
+            - *id003
+          - - y
+            - !!python/object:neuralprophet.df_utils.ShiftScale
+              scale: !!python/object/apply:numpy.core.multiarray.scalar
+              - *id002
+              - !!binary |
+                AAAAkPP/RkE=
+              shift: !!python/object/apply:numpy.core.multiarray.scalar
+              - *id002
+              - !!binary |
+                AAAAFvg6p0E=
+  normalize: auto
+  unknown_data_normalization: false
+config_regressors: !!python/object:neuralprophet.configure_components.FutureRegressors
+  layers: []
+  model: linear
+  regressors: null
+config_seasonality: !!python/object:neuralprophet.configure_components.Seasonalities
+  computation: fourier
+  condition_name: null
+  daily_arg: true
+  daily_global_local: auto
+  global_local: global
+  mode: additive
+  periods: !!python/object/apply:collections.OrderedDict
+  - - - weekly
+      - !!python/object:neuralprophet.configure_components.SingleSeasonality
+        arg: true
+        condition_name: null
+        global_local: global
+        period: 7
+        resolution: 3
+    - - daily
+      - !!python/object:neuralprophet.configure_components.SingleSeasonality
+        arg: true
+        condition_name: null
+        global_local: global
+        period: 1
+        resolution: 6
+  reg_lambda: 0.0
+  seasonality_local_reg: false
+  weekly_arg: true
+  weekly_global_local: auto
+  yearly_arg: false
+  yearly_global_local: auto
+config_train: !!python/object:neuralprophet.configure.Train
+  batch_size: 128
+  batches_per_epoch: 54
+  early_stopping: false
+  epochs: 100
+  lambda_delay: 50
+  learning_rate: 0.01
+  loss_func: !!python/object:torch.nn.modules.loss.SmoothL1Loss
+    _backward_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _backward_pre_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _buffers: !!python/object/apply:collections.OrderedDict
+    - []
+    _forward_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _forward_hooks_always_called: !!python/object/apply:collections.OrderedDict
+    - []
+    _forward_hooks_with_kwargs: !!python/object/apply:collections.OrderedDict
+    - []
+    _forward_pre_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _forward_pre_hooks_with_kwargs: !!python/object/apply:collections.OrderedDict
+    - []
+    _is_full_backward_hook: null
+    _load_state_dict_post_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _load_state_dict_pre_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _modules: !!python/object/apply:collections.OrderedDict
+    - []
+    _non_persistent_buffers_set: !!set {}
+    _parameters: !!python/object/apply:collections.OrderedDict
+    - []
+    _state_dict_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    _state_dict_pre_hooks: !!python/object/apply:collections.OrderedDict
+    - []
+    beta: 0.3
+    reduction: none
+    training: true
+  loss_func_name: SmoothL1Loss
+  n_data: 6912
+  newer_samples_start: 0.0
+  newer_samples_weight: 2
+  optimizer: AdamW
+  optimizer_args: {}
+  pl_trainer_config:
+    callbacks:
+    - !!python/object:neuralprophet.logger.ProgressBar
+      _current_eval_dataloader_idx: null
+      _enabled: true
+      _predict_progress_bar: null
+      _process_position: 0
+      _refresh_rate: 54
+      _test_progress_bar: null
+      _train_progress_bar: null
+      _trainer: null
+      _val_progress_bar: null
+      epochs: 100
+      main_progress_bar: null
+    default_root_dir: /home/shiwen/GitHub/AOE4
+    deterministic: false
+    enable_checkpointing: false
+    enable_model_summary: false
+    logger: !!python/object:neuralprophet.logger.MetricsLogger
+      _default_hp_metric: true
+      _experiment: null
+      _fs: !!python/object/apply:fsspec.spec.make_instance
+      - !!python/name:fsspec.implementations.local.LocalFileSystem ''
+      - !!python/tuple []
+      - {}
+      _kwargs: {}
+      _log_graph: false
+      _name: lightning_logs
+      _prefix: ''
+      _root_dir: /home/shiwen/GitHub/AOE4
+      _sub_dir: null
+      _version: null
+      checkpoint_path: null
+      history: !!python/object/apply:collections.defaultdict
+      - !!python/name:builtins.list ''
+      hparams: {}
+    max_epochs: 100
+    num_sanity_val_steps: 0
+  reg_delay_pct: 0.5
+  reg_lambda_trend: null
+  scheduler: onecyclelr
+  scheduler_args: null
+  trend_reg_threshold: null
+config_trend: !!python/object:neuralprophet.configure_components.Trend
+  changepoints: null
+  changepoints_range: 1.0
+  growth: linear
+  n_changepoints: 20
+  trend_global_local: global
+  trend_local_reg: false
+  trend_reg: 1.0e-05
+  trend_reg_threshold: null
+id_list:
+- __df__
+meta_used_in_model: false
+metrics:
+  MAE:
+  - MeanAbsoluteError
+  - {}
+  RMSE:
+  - MeanSquaredError
+  - squared: false
+n_forecasts: 1
+n_lags: 0
+num_seasonalities_modelled: 1
+num_seasonalities_modelled_dict: !!python/object/apply:collections.OrderedDict
+- - - yearly
+    - 1
+  - - weekly
+    - 1
+  - - daily
+    - 1
+num_trends_modelled: 1

@@ -1,10 +1,11 @@
-"""Generate reports/rating_update_report.md."""
+"""Generate reports/generated/rating_update_report.md."""
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-REPORT_PATH = Path(__file__).parent.parent / "reports" / "rating_update_report.md"
+BASE_DIR = Path(__file__).resolve().parents[2]
+REPORT_PATH = BASE_DIR / "reports" / "generated" / "rating_update_report.md"
 
 
 def _fmt_metrics(m: dict, indent: str = "") -> str:

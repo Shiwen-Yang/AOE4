@@ -1,4 +1,7 @@
 """LightGBM regression for rating delta prediction and shared metric utilities."""
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -166,6 +169,26 @@ def train_lgbm(
 
 def predict(model: lgb.LGBMRegressor, df: pd.DataFrame) -> np.ndarray:
     return model.predict(_prepare_X(df))
+
+
+def predict_booster(booster: lgb.Booster, df: pd.DataFrame) -> np.ndarray:
+    """Score a saved Booster (categorical mapping is stored in the model file)."""
+    return booster.predict(_prepare_X(df))
+
+
+def save_lgbm(model: lgb.LGBMRegressor, model_path, meta: dict, meta_path) -> None:
+    """Persist the trained booster (.txt) and a metadata JSON next to it."""
+    Path(model_path).parent.mkdir(parents=True, exist_ok=True)
+    model.booster_.save_model(str(model_path))
+    Path(meta_path).write_text(json.dumps(meta, indent=2))
+
+
+def load_lgbm(model_path, meta_path=None) -> tuple[lgb.Booster, dict]:
+    booster = lgb.Booster(model_file=str(model_path))
+    meta: dict = {}
+    if meta_path is not None and Path(meta_path).exists():
+        meta = json.loads(Path(meta_path).read_text())
+    return booster, meta
 
 
 def compute_shap(

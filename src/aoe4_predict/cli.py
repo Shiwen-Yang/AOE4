@@ -87,7 +87,7 @@ def _cmd_train(args) -> None:
     if model_path is None and test_seasons:
         train_tag  = "s" + "s".join(str(s) for s in seasons)
         test_tag   = "s" + "s".join(str(s) for s in test_seasons)
-        model_path = Path(f"models/lgbm_{train_tag}_test_{test_tag}.txt")
+        model_path = Path(f"models/aoe4_predict/lgbm_{train_tag}_test_{test_tag}.txt")
     meta_path = (
         model_path.parent / (model_path.stem + "_meta.json")
         if model_path else None
@@ -122,7 +122,13 @@ def _cmd_train(args) -> None:
     conn.close()
 
     print(f"\n4. Training model ({len(df):,} rows, {len([c for c in df.columns if c != 'target'])} features)...")
-    _, meta = train_model(df, model_path=model_path, meta_path=meta_path, test_seasons=test_seasons)
+    _, meta = train_model(
+        df,
+        model_path=model_path,
+        meta_path=meta_path,
+        test_seasons=test_seasons,
+        symmetric_slots=args.symmetric_slots,
+    )
 
     print(f"\nDone in {time.time()-t0:.0f}s")
     print("\n── LightGBM Metrics ──")
@@ -290,10 +296,11 @@ def main(argv=None) -> None:
 
     # train
     p_train = sub.add_parser("train", help="Build features and train LightGBM")
-    p_train.add_argument("--seasons", default=None, help="Comma-separated training season numbers (default: 10,11)")
+    p_train.add_argument("--seasons", default=None, help="Comma-separated training season numbers (default: 10,11,12)")
     p_train.add_argument("--test-seasons", default=None,
                          help="Seasons held out as test set (e.g. '11'). --seasons becomes train+valid only.")
     p_train.add_argument("--model", default=None, help="Output model file path")
+    p_train.add_argument("--symmetric-slots", action="store_true", help="Augment training rows with player A/B slot swaps")
     p_train.add_argument("--also-train-xgb", action="store_true", help="Also train XGBoost on same features")
     _add_family_flags(p_train)
     p_train.set_defaults(func=_cmd_train)
@@ -307,7 +314,7 @@ def main(argv=None) -> None:
     # report
     p_rep = sub.add_parser("report", help="Generate analysis_report.md (leakage audit, subgroups, SHAP)")
     p_rep.add_argument("--output", default=None, help="Output markdown path (default: analysis_report.md)")
-    p_rep.add_argument("--model", default=None, help="Model file to report on (default: models/lgbm_v1.txt)")
+    p_rep.add_argument("--model", default=None, help="Model file to report on (default: models/aoe4_predict/lgbm_s10s11s12.txt)")
     p_rep.add_argument("--meta",  default=None, help="Model meta JSON (default: same stem as --model)")
     p_rep.set_defaults(func=lambda a: __import__("aoe4_predict.report", fromlist=["generate_report"]).generate_report(
         report_path=Path(a.output) if a.output else None,
@@ -317,7 +324,7 @@ def main(argv=None) -> None:
 
     # analyze-civ
     p_civ = sub.add_parser("analyze-civ", help="Skill-stratified civ familiarity analysis")
-    p_civ.add_argument("--seasons", default=None, help="Training seasons (default: 10,11)")
+    p_civ.add_argument("--seasons", default=None, help="Training seasons (default: 10,11,12)")
     _add_family_flags(p_civ)
     p_civ.set_defaults(func=_cmd_analyze_civ)
 
@@ -327,7 +334,7 @@ def main(argv=None) -> None:
     p_tune.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials (default: 50)")
     p_tune.add_argument("--timeout", type=int, default=None, help="Max tuning wall-time in seconds")
     p_tune.add_argument("--no-retrain", action="store_true", help="Skip final re-train with best params")
-    p_tune.add_argument("--seasons", default=None, help="Comma-separated training seasons (default: 10,11)")
+    p_tune.add_argument("--seasons", default=None, help="Comma-separated training seasons (default: 10,11,12)")
     _add_family_flags(p_tune)
     p_tune.set_defaults(func=_cmd_tune)
 

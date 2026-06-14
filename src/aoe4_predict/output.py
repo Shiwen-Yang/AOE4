@@ -16,7 +16,9 @@ def _fmt_player_line(label: str, feat: dict, suffix: str) -> str:
     wr = feat.get(f"overall_wr_{suffix}", 0.5)
 
     skill_str = ""
-    if mmr is not None:
+    if feat.get("feature_sources", {}).get(f"skill_{suffix}") == "cold_start_prior":
+        skill_str = f"Imputed skill {int(feat.get(f'skill_{suffix}'))} (cold-start prior)"
+    elif mmr is not None:
         skill_str = f"MMR {int(mmr)}"
     elif rating is not None:
         skill_str = f"Rating {int(rating)} (MMR unavailable)"

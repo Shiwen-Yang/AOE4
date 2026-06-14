@@ -15,7 +15,14 @@ from typing import Any
 
 import pandas as pd
 
-from .config import GLOBAL_WR_PRIOR, NEW_PLAYER_THRESHOLD, PRIOR_STRENGTH
+from .config import (
+    COLD_START_BASE_SKILL,
+    COLD_START_OPPONENT_SKILL_GAP,
+    COLD_START_PRIOR_GAMES,
+    GLOBAL_WR_PRIOR,
+    NEW_PLAYER_THRESHOLD,
+    PRIOR_STRENGTH,
+)
 from .db import get_conn, table_exists
 
 # ── SQL for player temporal stats ─────────────────────────────────────────────
@@ -309,13 +316,17 @@ def build_training_features(conn, train_seasons: list[int]) -> pd.DataFrame:
 
 # ── Inference feature construction ────────────────────────────────────────────
 
-def _get_player_current_stats(profile_id: int, conn) -> dict[str, Any]:
+def _get_player_current_stats(profile_id: int, conn, before_timestamp=None) -> dict[str, Any]:
     """
     Compute a player's current stats using all available DB history.
     Uses two queries to avoid mixing aggregates and window functions.
+    before_timestamp: if set, only games strictly before this timestamp are counted.
     """
+    ts_clause = "AND g.started_at < ?" if before_timestamp is not None else ""
+    ts_params = [before_timestamp] if before_timestamp is not None else []
+
     agg = conn.execute(
-        """
+        f"""
         SELECT
             count(*)           AS games_lifetime,
             sum(p.result::INT) AS wins_lifetime,
@@ -326,8 +337,9 @@ def _get_player_current_stats(profile_id: int, conn) -> dict[str, Any]:
         WHERE p.profile_id = ?
           AND g.kind IN ('rm_1v1','rm_solo')
           AND p.result IS NOT NULL
+          {ts_clause}
         """,
-        [profile_id],
+        [profile_id] + ts_params,
     ).fetchone()
 
     if agg is None or agg[0] == 0:
@@ -340,18 +352,19 @@ def _get_player_current_stats(profile_id: int, conn) -> dict[str, Any]:
             "last_season": None,
         }
 
-    # Most recent non-null MMR
+    # Most recent non-null MMR before the cutoff
     mmr_row = conn.execute(
-        """
+        f"""
         SELECT p.mmr, p.rating
         FROM participants p
         JOIN games g ON p.game_id = g.game_id
         WHERE p.profile_id = ? AND g.kind IN ('rm_1v1','rm_solo')
           AND (p.mmr IS NOT NULL OR p.rating IS NOT NULL)
+          {ts_clause}
         ORDER BY g.started_at DESC
         LIMIT 1
         """,
-        [profile_id],
+        [profile_id] + ts_params,
     ).fetchone()
 
     return {
@@ -364,15 +377,21 @@ def _get_player_current_stats(profile_id: int, conn) -> dict[str, Any]:
     }
 
 
-def _get_player_season_stats(profile_id: int, season: int, conn) -> dict[str, int]:
-    """Season games and wins before midnight today (matches training day-level window).
+def _get_player_season_stats(profile_id: int, season: int, conn, before_timestamp=None) -> dict[str, int]:
+    """Season games and wins before the given timestamp (or midnight today if not set).
 
-    g.started_at < current_date: SQL implicitly casts a bare DATE to that date at
-    00:00:00 when compared to a timestamp, giving the same midnight cutoff as
-    INTERVAL '1 day' PRECEDING in the training SQL.
+    Matches the training day-level window: g.started_at < cutoff where cutoff is
+    either the match start time (historical inference) or midnight today (live predict).
     """
+    if before_timestamp is not None:
+        cutoff_clause = "AND g.started_at < ?"
+        params = [profile_id, season, before_timestamp]
+    else:
+        cutoff_clause = "AND g.started_at < current_date"
+        params = [profile_id, season]
+
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*), COALESCE(SUM(p.result::INT), 0)
         FROM participants p
         JOIN games g ON p.game_id = g.game_id
@@ -380,39 +399,45 @@ def _get_player_season_stats(profile_id: int, season: int, conn) -> dict[str, in
           AND g.season = ?
           AND g.kind IN ('rm_1v1', 'rm_solo')
           AND p.result IS NOT NULL
-          AND g.started_at < current_date
+          {cutoff_clause}
         """,
-        [profile_id, season],
+        params,
     ).fetchone()
     return {"games_season": row[0] or 0, "wins_season": row[1] or 0}
 
 
-def _get_player_civ_stats(profile_id: int, civ: str | None, conn) -> dict[str, Any]:
+def _get_player_civ_stats(profile_id: int, civ: str | None, conn, before_timestamp=None) -> dict[str, Any]:
     if civ is None:
         return {"civ_games": 0, "civ_wins": 0}
+    ts_clause = "AND g.started_at < ?" if before_timestamp is not None else ""
+    ts_params = [before_timestamp] if before_timestamp is not None else []
     row = conn.execute(
-        """
+        f"""
         SELECT count(*), sum(p.result::INT)
         FROM participants p JOIN games g ON p.game_id = g.game_id
         WHERE p.profile_id = ? AND p.civilization = ?
           AND g.kind IN ('rm_1v1','rm_solo') AND p.result IS NOT NULL
+          {ts_clause}
         """,
-        [profile_id, civ],
+        [profile_id, civ] + ts_params,
     ).fetchone()
     return {"civ_games": row[0] or 0, "civ_wins": row[1] or 0}
 
 
-def _get_player_map_stats(profile_id: int, map_name: str | None, conn) -> dict[str, Any]:
+def _get_player_map_stats(profile_id: int, map_name: str | None, conn, before_timestamp=None) -> dict[str, Any]:
     if map_name is None:
         return {"map_games": 0, "map_wins": 0}
+    ts_clause = "AND g.started_at < ?" if before_timestamp is not None else ""
+    ts_params = [before_timestamp] if before_timestamp is not None else []
     row = conn.execute(
-        """
+        f"""
         SELECT count(*), sum(p.result::INT)
         FROM participants p JOIN games g ON p.game_id = g.game_id
         WHERE p.profile_id = ? AND g.map = ?
           AND g.kind IN ('rm_1v1','rm_solo') AND p.result IS NOT NULL
+          {ts_clause}
         """,
-        [profile_id, map_name],
+        [profile_id, map_name] + ts_params,
     ).fetchone()
     return {"map_games": row[0] or 0, "map_wins": row[1] or 0}
 
@@ -442,6 +467,66 @@ def _get_civ_matchup_prior(civ_a: str | None, civ_b: str | None, conn) -> dict[s
     return {"prior_matchup_games": games, "prior_matchup_wins": wins}
 
 
+def _apply_cold_start_skill_priors(feat: dict[str, Any]) -> dict[str, Any]:
+    """Impute inference-only skill priors while preserving missingness flags."""
+    original_skill = {
+        "a": feat.get("skill_a"),
+        "b": feat.get("skill_b"),
+    }
+    imputed: dict[str, int] = {}
+
+    if original_skill["a"] is None and original_skill["b"] is None:
+        imputed["a"] = COLD_START_BASE_SKILL
+        imputed["b"] = COLD_START_BASE_SKILL
+    elif original_skill["a"] is None:
+        imputed["a"] = int(round(original_skill["b"] - COLD_START_OPPONENT_SKILL_GAP))
+    elif original_skill["b"] is None:
+        imputed["b"] = int(round(original_skill["a"] - COLD_START_OPPONENT_SKILL_GAP))
+
+    feature_sources: dict[str, str] = {}
+    imputations: list[dict[str, Any]] = []
+    for side, label in (("a", "Player A"), ("b", "Player B")):
+        key = f"skill_{side}"
+        if side in imputed:
+            value = imputed[side]
+            feat[key] = value
+            feature_sources[key] = "cold_start_prior"
+            if original_skill["a"] is None and original_skill["b"] is None:
+                method = "global_baseline"
+            else:
+                method = "opponent_aware"
+            imputations.append(
+                {
+                    "player": label,
+                    "feature": key,
+                    "value": value,
+                    "method": method,
+                    "prior_games": COLD_START_PRIOR_GAMES,
+                }
+            )
+        else:
+            feature_sources[key] = "local_history"
+
+    feat["skill_diff"] = feat["skill_a"] - feat["skill_b"]
+    feat["mmr_diff"] = (
+        (feat["mmr_a"] if feat.get("mmr_a") is not None else feat["skill_a"])
+        - (feat["mmr_b"] if feat.get("mmr_b") is not None else feat["skill_b"])
+    )
+    feat["rating_diff"] = (
+        (feat["rating_a"] if feat.get("rating_a") is not None else feat["skill_a"])
+        - (feat["rating_b"] if feat.get("rating_b") is not None else feat["skill_b"])
+    )
+    feat["cold_start_prior_applied"] = int(bool(imputations))
+    feat["feature_sources"] = feature_sources
+    feat["imputations"] = imputations
+    feat["prediction_confidence"] = (
+        "low"
+        if imputations or feat.get("is_new_player_a") or feat.get("is_new_player_b")
+        else "standard"
+    )
+    return feat
+
+
 def get_inference_features(
     player_a_id: int,
     player_b_id: int,
@@ -452,29 +537,45 @@ def get_inference_features(
     patch: str | None = None,
     conn=None,
     db_path=None,
+    before_timestamp=None,
 ) -> dict[str, Any]:
     """
     Compute features for a single match prediction.
     Returns a dict that can be passed to the model after feature_cols selection.
+
+    before_timestamp: if set, all player-history queries are filtered to games
+    strictly before this datetime — prevents leakage when scoring historical matches.
     """
     own_conn = conn is None
     if own_conn:
         conn = get_conn(db_path, read_only=True)
 
     if season is None:
-        season = conn.execute("SELECT max(season) FROM games").fetchone()[0]
+        if before_timestamp is not None:
+            row = conn.execute(
+                "SELECT max(season) FROM games WHERE started_at < ?", [before_timestamp]
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT max(season) FROM games").fetchone()
+        season = row[0] if row else None
     if patch is None:
-        patch = conn.execute("SELECT patch FROM games ORDER BY started_at DESC LIMIT 1").fetchone()
-        patch = patch[0] if patch else None
+        if before_timestamp is not None:
+            row = conn.execute(
+                "SELECT patch FROM games WHERE started_at < ? ORDER BY started_at DESC LIMIT 1",
+                [before_timestamp],
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT patch FROM games ORDER BY started_at DESC LIMIT 1").fetchone()
+        patch = row[0] if row else None
 
-    a = _get_player_current_stats(player_a_id, conn)
-    b = _get_player_current_stats(player_b_id, conn)
-    season_a = _get_player_season_stats(player_a_id, season, conn)
-    season_b = _get_player_season_stats(player_b_id, season, conn)
-    civ_stats_a = _get_player_civ_stats(player_a_id, civ_a, conn)
-    civ_stats_b = _get_player_civ_stats(player_b_id, civ_b, conn)
-    map_stats_a = _get_player_map_stats(player_a_id, map_name, conn)
-    map_stats_b = _get_player_map_stats(player_b_id, map_name, conn)
+    a = _get_player_current_stats(player_a_id, conn, before_timestamp)
+    b = _get_player_current_stats(player_b_id, conn, before_timestamp)
+    season_a = _get_player_season_stats(player_a_id, season, conn, before_timestamp)
+    season_b = _get_player_season_stats(player_b_id, season, conn, before_timestamp)
+    civ_stats_a = _get_player_civ_stats(player_a_id, civ_a, conn, before_timestamp)
+    civ_stats_b = _get_player_civ_stats(player_b_id, civ_b, conn, before_timestamp)
+    map_stats_a = _get_player_map_stats(player_a_id, map_name, conn, before_timestamp)
+    map_stats_b = _get_player_map_stats(player_b_id, map_name, conn, before_timestamp)
     matchup = _get_civ_matchup_prior(civ_a, civ_b, conn)
 
     import datetime
@@ -565,6 +666,7 @@ def get_inference_features(
     feat["civs_known"] = int(civ_a is not None and civ_b is not None)
     feat["map_known"] = int(map_name is not None)
     feat["full_context_known"] = int(feat["civs_known"] and feat["map_known"])
+    feat = _apply_cold_start_skill_priors(feat)
 
     if own_conn:
         conn.close()

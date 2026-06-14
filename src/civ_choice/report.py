@@ -1,9 +1,12 @@
-"""Generate reports/civ_choice_report.md."""
+"""Generate reports/generated/civ_choice_report.md."""
 from pathlib import Path
 
 import numpy as np
 
-REPORT_PATH = Path(__file__).parent.parent / "reports" / "civ_choice_report.md"
+from .features import ALL_FEATURES
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+REPORT_PATH = BASE_DIR / "reports" / "generated" / "civ_choice_report.md"
 
 
 def _fmt(m: dict) -> str:
@@ -176,8 +179,8 @@ the game's start timestamp (`MIN(started_at)` per civ from data). For S10+S11 al
 
 ## 5. Feature Summary
 
-**Candidate features**: {len(all_metrics.get('LightGBM', {}))} model features including pick shares
-(lifetime, 30d, patch, map), win rates, recency flags, global pick rates, and civ ranks.
+**Candidate features**: {len(ALL_FEATURES)} model features including pick shares
+(lifetime, 30d, patch, map), win rates, exact recent-pick rank flags, global pick rates, and civ ranks.
 
 **Player features**: MMR/rating, game counts, civ-pool entropy, main-civ share.
 
@@ -243,8 +246,8 @@ All 18×18=324 win-model evaluations are batched. See `civ_choice/integrate.py`.
 
 - 20% game-level training sample; final metrics on full test set.
 - Randomized civ choices excluded from training (V1).
-- 30d, patch, map stats via LATERAL aggregations — exact but computed at training time only.
-- `candidate_was_played_last_3/5_games` approximated from 30d count, not exact game sequence.
+- 30d, patch, map, and exact last-20-games stats via LATERAL aggregations — exact but computed at training time only.
+- `candidate_was_played_last_3/5_games` remains approximated from 30d count, but last-20-games top ranks are exact.
 - Global pick rate this-season approximates with full-season rate (includes future games in season).
 
 ---

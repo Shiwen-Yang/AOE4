@@ -1,10 +1,6 @@
 """Resume: retrain XGB with tuned params, then generate report."""
 import json, gc
 from pathlib import Path
-import sys
-
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from aoe4_predict.db import get_conn
 from aoe4_predict.features_extra import extend_training_features, FAMILY_FEATURES, DISABLED_FAMILIES
@@ -13,14 +9,14 @@ from aoe4_predict.report import generate_report
 
 TRAIN_SEASONS = [9, 10]
 TEST_SEASONS  = [11]
-XGB_MODEL  = Path("models/xgb_s9s10_test_s11.ubj")
-XGB_META   = Path("models/xgb_s9s10_test_s11_meta.json")
-LGBM_MODEL = Path("models/lgbm_s9s10_test_s11.txt")
-LGBM_META  = Path("models/lgbm_s9s10_test_s11_meta.json")
-REPORT     = Path("reports/analysis_report_s9s10_test_s11.md")
+XGB_MODEL  = Path("models/aoe4_predict/xgb_s9s10_test_s11.ubj")
+XGB_META   = Path("models/aoe4_predict/xgb_s9s10_test_s11_meta.json")
+LGBM_MODEL = Path("models/aoe4_predict/lgbm_s9s10_test_s11.txt")
+LGBM_META  = Path("models/aoe4_predict/lgbm_s9s10_test_s11_meta.json")
+REPORT     = Path("reports/generated/analysis_report_s9s10_test_s11.md")
 
 # Load tuned XGB best params
-best_params = json.loads(Path("models/xgb_best_params.json").read_text())
+best_params = json.loads(Path("models/aoe4_predict/xgb_best_params.json").read_text())
 
 print("Loading dataset from DuckDB extended tables (training_features already built)...")
 conn = get_conn(None)

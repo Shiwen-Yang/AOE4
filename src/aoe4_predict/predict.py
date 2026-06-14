@@ -22,6 +22,7 @@ def predict_match(
     db_path=None,
     model=None,
     meta: dict | None = None,
+    before_timestamp=None,
 ) -> dict[str, Any]:
     """
     Returns:
@@ -48,6 +49,7 @@ def predict_match(
         civ_b=civ_b,
         map_name=map_name,
         conn=conn,
+        before_timestamp=before_timestamp,
     )
 
     ext = get_extended_inference_features(
@@ -57,6 +59,7 @@ def predict_match(
         civ_b=civ_b,
         base_feat=feat,
         conn=conn,
+        before_timestamp=before_timestamp,
     )
     feat.update(ext)
 
@@ -84,9 +87,16 @@ def predict_match(
     if feat["missing_mmr_b"] and not feat["missing_rating_b"]:
         warnings.append("MMR missing for Player B — using visible rating as fallback.")
     if feat["missing_skill_a"]:
-        warnings.append("No MMR or rating found for Player A — skill signal absent.")
+        warnings.append("No local MMR or rating found for Player A.")
     if feat["missing_skill_b"]:
-        warnings.append("No MMR or rating found for Player B — skill signal absent.")
+        warnings.append("No local MMR or rating found for Player B.")
+    for imputation in feat.get("imputations", []):
+        warnings.append(
+            f"{imputation['player']} skill imputed with {imputation['method'].replace('_', ' ')} "
+            f"cold-start prior ({int(imputation['value'])})."
+        )
+    if feat.get("cold_start_prior_applied"):
+        warnings.append("Prediction uses cold-start priors — treat probability as low confidence.")
     if context == "id_only":
         warnings.append("No civ or map context provided — prediction is less specific.")
     if feat.get("prior_matchup_games", 0) < 20 and civ_a and civ_b:
@@ -108,6 +118,9 @@ def predict_match(
         "win_prob_a": round(win_prob_a, 4),
         "win_prob_b": round(1 - win_prob_a, 4),
         "features": feat,
+        "feature_sources": feat.get("feature_sources", {}),
+        "imputations": feat.get("imputations", []),
+        "prediction_confidence": feat.get("prediction_confidence", "standard"),
         "warnings": warnings,
         "model_meta": {
             "patch": feat.get("patch"),

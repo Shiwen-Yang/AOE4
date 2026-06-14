@@ -930,6 +930,19 @@ def extend_training_features(
     if "patch_priors" in active:
         df = _p7_derived(df)
 
+    # Drop columns that belong to non-active families.  The wide SQL join
+    # (_fetch_player_ext) returns ALL columns from player_stats_ext regardless of
+    # which families were requested; stripping unused columns here keeps the returned
+    # DataFrame clean and prevents disabled-family features from leaking into training.
+    cols_to_drop = []
+    for fam_name, feats in FAMILY_FEATURES.items():
+        if fam_name not in active:
+            for feat in feats:
+                if feat in df.columns:
+                    cols_to_drop.append(feat)
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop)
+
     # Downcast float64 → float32 to halve the returned DataFrame footprint.
     # LightGBM bins to uint8 internally, so float32 precision is sufficient.
     for col in df.select_dtypes(include="float64").columns:
@@ -948,22 +961,34 @@ def get_extended_inference_features(
     civ_b: str | None,
     base_feat: dict,
     conn,
+    before_timestamp=None,
 ) -> dict[str, Any]:
     """
     Compute P1-P5, P8-P9 extended features for a single match prediction.
 
     Queries participants+games directly — no dependency on player_stats_ext or
     h2h_priors being pre-built.  Mirrors the window semantics used during training:
-      - Time-window counts (P1, P9) are computed relative to now().
+      - Time-window counts (P1, P9) use before_timestamp as the reference point
+        (falls back to now() for live predictions).
       - Lag-based features (P2, P3) use the N most recent games in chronological
         order, matching LAG(mmr, N) / ROWS BETWEEN N PRECEDING AND 1 PRECEDING.
-      - Lifetime duration stats (P4) cover all recorded games.
+      - Lifetime duration stats (P4) cover all recorded games before the cutoff.
 
     Returns a dict of additional features; caller merges with base_feat.
     The player_a / player_b assignment in base_feat must already follow the
     profile_id_a < profile_id_b convention.
     """
     import datetime
+
+    # Reference point for time-window features (P1, P9)
+    ref_ts = before_timestamp if before_timestamp is not None else datetime.datetime.utcnow()
+    # Ensure ref_ts is a datetime (not a pandas Timestamp)
+    if hasattr(ref_ts, "to_pydatetime"):
+        ref_ts = ref_ts.to_pydatetime()
+    if hasattr(ref_ts, "tzinfo") and ref_ts.tzinfo is not None:
+        ref_ts = ref_ts.replace(tzinfo=None)
+
+    ts_upper_clause = "AND g.started_at < $ts" if before_timestamp is not None else ""
 
     ext: dict[str, Any] = {}
     pid_lo = min(player_a_id, player_b_id)
@@ -974,32 +999,33 @@ def get_extended_inference_features(
         # ── One aggregation query covers P1 (civ windows), P4 (lifetime duration
         #    stats), and P9 (activity windows).  civ=None causes all civ FILTER
         #    conditions to evaluate as NULL → 0, which is the correct default.
-        agg = conn.execute("""
+        agg = conn.execute(f"""
             SELECT
-                AVG(g.duration)                                                                     AS avg_dur_life,
-                AVG(g.duration) FILTER (WHERE p.civilization = $civ)                               AS civ_avg_dur,
-                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900)         AS short_games,
-                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900),  0) AS short_wins,
-                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800)        AS long_games,
-                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800),  0) AS long_wins,
-                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '7 days')  AS civ_games_7d,
-                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '7 days'),  0) AS civ_wins_7d,
-                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '30 days') AS civ_games_30d,
-                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '30 days'), 0) AS civ_wins_30d,
-                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '60 days') AS civ_games_60d,
-                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= now() - INTERVAL '60 days'), 0) AS civ_wins_60d,
-                MAX(g.started_at) FILTER (WHERE p.civilization = $civ)                             AS last_civ_game_at,
-                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '7 days')           AS act_games_7d,
-                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '14 days')          AS act_games_14d,
-                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '30 days')          AS act_games_30d,
-                COUNT(*)        FILTER (WHERE g.started_at >= now() - INTERVAL '60 days')          AS act_games_60d
+                AVG(g.duration)                                                                                  AS avg_dur_life,
+                AVG(g.duration) FILTER (WHERE p.civilization = $civ)                                            AS civ_avg_dur,
+                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900)                      AS short_games,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration <= 900),  0)    AS short_wins,
+                COUNT(*)        FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800)                     AS long_games,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE g.duration IS NOT NULL AND g.duration >  1800),  0)   AS long_wins,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '7 days')  AS civ_games_7d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '7 days'),  0) AS civ_wins_7d,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '30 days') AS civ_games_30d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '30 days'), 0) AS civ_wins_30d,
+                COUNT(*)        FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '60 days') AS civ_games_60d,
+                COALESCE(SUM(p.result::INT) FILTER (WHERE p.civilization = $civ AND g.started_at >= $ts - INTERVAL '60 days'), 0) AS civ_wins_60d,
+                MAX(g.started_at) FILTER (WHERE p.civilization = $civ)                                          AS last_civ_game_at,
+                COUNT(*)        FILTER (WHERE g.started_at >= $ts - INTERVAL '7 days')                          AS act_games_7d,
+                COUNT(*)        FILTER (WHERE g.started_at >= $ts - INTERVAL '14 days')                         AS act_games_14d,
+                COUNT(*)        FILTER (WHERE g.started_at >= $ts - INTERVAL '30 days')                         AS act_games_30d,
+                COUNT(*)        FILTER (WHERE g.started_at >= $ts - INTERVAL '60 days')                         AS act_games_60d
             FROM participants p
             JOIN games g ON p.game_id = g.game_id
             WHERE p.profile_id = $pid
               AND g.kind IN ('rm_1v1', 'rm_solo')
               AND p.result IS NOT NULL
               AND g.started_at IS NOT NULL
-        """, {"pid": pid, "civ": civ}).fetchone()
+              {ts_upper_clause}
+        """, {"pid": pid, "civ": civ, "ts": ref_ts}).fetchone()
 
         ext[f"avg_dur_life_{side}"]   = agg[0]
         ext[f"civ_avg_dur_{side}"]    = agg[1]
@@ -1025,7 +1051,7 @@ def get_extended_inference_features(
                 ts = ts.to_pydatetime()
             if ts.tzinfo is not None:
                 ts = ts.replace(tzinfo=None)
-            ext[f"days_since_civ_{side}"] = (datetime.datetime.utcnow() - ts).days
+            ext[f"days_since_civ_{side}"] = (ref_ts - ts).days
         else:
             ext[f"days_since_civ_{side}"] = None
 
@@ -1034,7 +1060,9 @@ def get_extended_inference_features(
         #    mmr_lag{N} at inference = mmr[N-1] in this list (0-indexed):
         #      training LAG(mmr, N) at row G+1 = mmr at row (G+1-N) = mmr[G-(N-1)]
         #      which is the N-th element back from the most recent game → index N-1.
-        recent = conn.execute("""
+        recent_ts_clause = "AND g.started_at < ?" if before_timestamp is not None else ""
+        recent_params = [pid] + ([before_timestamp] if before_timestamp is not None else [])
+        recent = conn.execute(f"""
             SELECT p.mmr, p.result::INT, g.duration
             FROM participants p
             JOIN games g ON p.game_id = g.game_id
@@ -1042,9 +1070,10 @@ def get_extended_inference_features(
               AND g.kind IN ('rm_1v1', 'rm_solo')
               AND p.result IS NOT NULL
               AND g.started_at IS NOT NULL
+              {recent_ts_clause}
             ORDER BY g.started_at DESC, g.game_id DESC
             LIMIT 20
-        """, [pid]).fetchall()
+        """, recent_params).fetchall()
 
         # P2: MMR lags and rolling stats (keep nulls to match LAG behaviour)
         mmr_seq = [r[0] for r in recent]
@@ -1066,7 +1095,9 @@ def get_extended_inference_features(
         ext[f"avg_dur_20_{side}"] = float(np.mean(dur20)) if dur20 else None
 
     # ── P5: head-to-head record between the exact pair ────────────────────────
-    h2h = conn.execute("""
+    h2h_ts_clause = "AND g.started_at < ?" if before_timestamp is not None else ""
+    h2h_params = [pid_lo, pid_hi] + ([before_timestamp] if before_timestamp is not None else [])
+    h2h = conn.execute(f"""
         SELECT COUNT(*), COALESCE(SUM(p_lo.result::INT), 0)
         FROM participants p_lo
         JOIN participants p_hi ON p_lo.game_id = p_hi.game_id
@@ -1074,7 +1105,8 @@ def get_extended_inference_features(
         WHERE p_lo.profile_id = ? AND p_hi.profile_id = ?
           AND g.kind IN ('rm_1v1', 'rm_solo')
           AND p_lo.result IS NOT NULL
-    """, [pid_lo, pid_hi]).fetchone()
+          {h2h_ts_clause}
+    """, h2h_params).fetchone()
     h2h_games    = h2h[0] or 0
     h2h_wins_lo  = h2h[1] or 0
     ext["h2h_games"]  = h2h_games
@@ -1095,6 +1127,668 @@ def get_extended_inference_features(
     row = df.iloc[0].to_dict()
     # Return only the keys that aren't already in base_feat (avoids double-writing)
     return {k: v for k, v in row.items() if k not in base_feat}
+
+
+# ── capped-history training overrides for API-style experiments ──────────────
+
+def build_api_cap_p1_p3_p4_p5_overrides(conn, visible_match_cap: int) -> pd.DataFrame:
+    """
+    Return one row per training_features game_id with P1/P3/P4/P5 semantics
+    recomputed
+    under a "last N prior games per player" visibility cap.
+
+    This mirrors a recent-games API page at training time:
+      - P1 civ-recency stats are limited to the last N visible prior games.
+      - P3 recent-form semantics are unchanged because the baseline already uses
+        only the most recent 5/10/20 games, which fit inside the capped slice.
+      - P4 duration-profile stats are limited to the last N visible prior games.
+      - P5 head-to-head only counts prior meetings visible in both players'
+        capped N-game histories.
+
+    training_features must already exist and contain the requested seasons.
+    """
+    if visible_match_cap <= 0:
+        raise ValueError("visible_match_cap must be positive")
+    query = """
+    WITH ordered AS (
+        SELECT
+            ps.game_id,
+            ps.profile_id,
+            ps.result::INT AS result,
+            ps.civ,
+            ps.started_at,
+            g.duration,
+            ROW_NUMBER() OVER (
+                PARTITION BY ps.profile_id
+                ORDER BY ps.started_at, ps.game_id
+            ) AS seq
+        FROM player_stats ps
+        JOIN games g ON ps.game_id = g.game_id
+    ),
+    side_a AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS visible_games_a,
+            AVG(prev.duration) AS avg_dur_life_a,
+            AVG(prev.duration) FILTER (WHERE prev.civ = tf.civ_a) AS civ_avg_dur_a,
+            AVG(prev.duration) FILTER (WHERE prev.seq >= cur.seq - 20) AS avg_dur_20_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ) AS civ_games_7d_a,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ), 0) AS civ_wins_7d_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS civ_games_30d_a,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ), 0) AS civ_wins_30d_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ) AS civ_games_60d_a,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_a
+                  AND prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ), 0) AS civ_wins_60d_a,
+            DATEDIFF(
+                'day',
+                MAX(prev.started_at) FILTER (WHERE prev.civ = tf.civ_a),
+                tf.started_at
+            ) AS days_since_civ_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS act_games_30d_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ) AS act_games_60d_a,
+            COUNT(prev.game_id) FILTER (WHERE prev.duration IS NOT NULL AND prev.duration <= 900) AS short_games_a,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.duration IS NOT NULL AND prev.duration <= 900
+            ), 0) AS short_wins_a,
+            COUNT(prev.game_id) FILTER (WHERE prev.duration IS NOT NULL AND prev.duration > 1800) AS long_games_a,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.duration IS NOT NULL AND prev.duration > 1800
+            ), 0) AS long_wins_a
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_a = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_a
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, tf.started_at, tf.civ_a, cur.seq
+    ),
+    side_b AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS visible_games_b,
+            AVG(prev.duration) AS avg_dur_life_b,
+            AVG(prev.duration) FILTER (WHERE prev.civ = tf.civ_b) AS civ_avg_dur_b,
+            AVG(prev.duration) FILTER (WHERE prev.seq >= cur.seq - 20) AS avg_dur_20_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ) AS civ_games_7d_b,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ), 0) AS civ_wins_7d_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS civ_games_30d_b,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ), 0) AS civ_wins_30d_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ) AS civ_games_60d_b,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.civ = tf.civ_b
+                  AND prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ), 0) AS civ_wins_60d_b,
+            DATEDIFF(
+                'day',
+                MAX(prev.started_at) FILTER (WHERE prev.civ = tf.civ_b),
+                tf.started_at
+            ) AS days_since_civ_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS act_games_30d_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '60 days'
+            ) AS act_games_60d_b,
+            COUNT(prev.game_id) FILTER (WHERE prev.duration IS NOT NULL AND prev.duration <= 900) AS short_games_b,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.duration IS NOT NULL AND prev.duration <= 900
+            ), 0) AS short_wins_b,
+            COUNT(prev.game_id) FILTER (WHERE prev.duration IS NOT NULL AND prev.duration > 1800) AS long_games_b,
+            COALESCE(SUM(prev.result) FILTER (
+                WHERE prev.duration IS NOT NULL AND prev.duration > 1800
+            ), 0) AS long_wins_b
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_b = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_b
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, tf.started_at, tf.civ_b, cur.seq
+    ),
+    h2h AS (
+        SELECT
+            tf.game_id,
+            COUNT(pb.game_id) AS h2h_games,
+            COALESCE(SUM(pa.result) FILTER (WHERE pb.game_id IS NOT NULL), 0) AS h2h_wins_a
+        FROM training_features tf
+        JOIN ordered cur_a
+          ON tf.game_id = cur_a.game_id
+         AND tf.profile_id_a = cur_a.profile_id
+        JOIN ordered cur_b
+          ON tf.game_id = cur_b.game_id
+         AND tf.profile_id_b = cur_b.profile_id
+        LEFT JOIN ordered pa
+          ON pa.profile_id = tf.profile_id_a
+         AND pa.seq BETWEEN cur_a.seq - $visible_match_cap AND cur_a.seq - 1
+        LEFT JOIN ordered pb
+          ON pb.profile_id = tf.profile_id_b
+         AND pb.game_id = pa.game_id
+         AND pb.seq BETWEEN cur_b.seq - $visible_match_cap AND cur_b.seq - 1
+        GROUP BY tf.game_id
+    )
+    SELECT
+        tf.game_id,
+        side_a.* EXCLUDE (game_id),
+        side_b.* EXCLUDE (game_id),
+        h2h.h2h_games,
+        h2h.h2h_wins_a
+    FROM training_features tf
+    LEFT JOIN side_a ON tf.game_id = side_a.game_id
+    LEFT JOIN side_b ON tf.game_id = side_b.game_id
+    LEFT JOIN h2h ON tf.game_id = h2h.game_id
+    ORDER BY tf.game_id
+    """
+    return conn.execute(query, {"visible_match_cap": visible_match_cap}).df()
+
+
+def build_api50_p1_p3_p4_p5_overrides(conn) -> pd.DataFrame:
+    return build_api_cap_p1_p3_p4_p5_overrides(conn, visible_match_cap=50)
+
+
+def apply_api50_p1_p3_p4_p5_overrides(df: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replace full-history P1/P3/P4/P5 feature values with their API-style capped
+    last-50-games equivalents.
+
+    Only P1/P4/P5 columns are overwritten. P3 columns are intentionally left
+    unchanged because their 5/10/20-game windows are already fully recoverable
+    inside the capped 50-game visible slice.
+    """
+    merged = df.merge(overrides, on="game_id", how="left", suffixes=("", "__api50"))
+
+    def assign(col: str) -> None:
+        api_col = f"{col}__api50"
+        if api_col not in merged.columns:
+            return
+        merged[col] = merged[api_col]
+
+    raw_cols = [
+        "visible_games_a", "visible_games_b",
+        "avg_dur_life_a", "avg_dur_life_b",
+        "avg_dur_20_a", "avg_dur_20_b",
+        "civ_avg_dur_a", "civ_avg_dur_b",
+        "civ_games_7d_a", "civ_wins_7d_a", "civ_games_30d_a", "civ_wins_30d_a",
+        "civ_games_60d_a", "civ_wins_60d_a", "days_since_civ_a",
+        "act_games_30d_a", "act_games_60d_a",
+        "short_games_a", "short_wins_a", "long_games_a", "long_wins_a",
+        "civ_games_7d_b", "civ_wins_7d_b", "civ_games_30d_b", "civ_wins_30d_b",
+        "civ_games_60d_b", "civ_wins_60d_b", "days_since_civ_b",
+        "act_games_30d_b", "act_games_60d_b",
+        "short_games_b", "short_wins_b", "long_games_b", "long_wins_b",
+        "h2h_games", "h2h_wins_a",
+    ]
+    for col in raw_cols:
+        assign(col)
+
+    for side in ("a", "b"):
+        merged[f"civ_wr_7d_{side}"] = _smooth(
+            merged[f"civ_wins_7d_{side}"].fillna(0),
+            merged[f"civ_games_7d_{side}"].fillna(0),
+        )
+        merged[f"civ_wr_30d_{side}"] = _smooth(
+            merged[f"civ_wins_30d_{side}"].fillna(0),
+            merged[f"civ_games_30d_{side}"].fillna(0),
+        )
+        merged[f"civ_wr_60d_{side}"] = _smooth(
+            merged[f"civ_wins_60d_{side}"].fillna(0),
+            merged[f"civ_games_60d_{side}"].fillna(0),
+        )
+        merged[f"civ_frac_30d_{side}"] = (
+            merged[f"civ_games_30d_{side}"].fillna(0)
+            / merged[f"act_games_30d_{side}"].fillna(0).clip(lower=1)
+        )
+        merged[f"civ_frac_60d_{side}"] = (
+            merged[f"civ_games_60d_{side}"].fillna(0)
+            / merged[f"act_games_60d_{side}"].fillna(0).clip(lower=1)
+        )
+        merged[f"short_wr_{side}"] = _smooth(
+            merged[f"short_wins_{side}"].fillna(0),
+            merged[f"short_games_{side}"].fillna(0),
+        )
+        merged[f"long_wr_{side}"] = _smooth(
+            merged[f"long_wins_{side}"].fillna(0),
+            merged[f"long_games_{side}"].fillna(0),
+        )
+        visible = merged[f"visible_games_{side}"].fillna(0).clip(lower=1)
+        merged[f"short_share_{side}"] = merged[f"short_games_{side}"].fillna(0) / visible
+        merged[f"long_share_{side}"] = merged[f"long_games_{side}"].fillna(0) / visible
+
+    merged["civ_wr_30d_diff"] = merged["civ_wr_30d_a"] - merged["civ_wr_30d_b"]
+    merged["civ_wr_60d_diff"] = merged["civ_wr_60d_a"] - merged["civ_wr_60d_b"]
+    merged["civ_frac_30d_diff"] = merged["civ_frac_30d_a"] - merged["civ_frac_30d_b"]
+    merged["civ_frac_60d_diff"] = merged["civ_frac_60d_a"] - merged["civ_frac_60d_b"]
+
+    merged["avg_dur_life_diff"] = merged["avg_dur_life_a"].fillna(0) - merged["avg_dur_life_b"].fillna(0)
+    merged["avg_dur_20_diff"] = merged["avg_dur_20_a"].fillna(0) - merged["avg_dur_20_b"].fillna(0)
+    merged["civ_avg_dur_diff"] = merged["civ_avg_dur_a"].fillna(0) - merged["civ_avg_dur_b"].fillna(0)
+    merged["short_wr_diff"] = merged["short_wr_a"] - merged["short_wr_b"]
+    merged["long_wr_diff"] = merged["long_wr_a"] - merged["long_wr_b"]
+    merged["short_share_diff"] = merged["short_share_a"] - merged["short_share_b"]
+    merged["long_share_diff"] = merged["long_share_a"] - merged["long_share_b"]
+
+    merged["h2h_wr_a"] = (merged["h2h_wins_a"].fillna(0) + 2.5) / (merged["h2h_games"].fillna(0) + 5)
+    if "h2h_has_data" in merged.columns:
+        merged["h2h_has_data"] = (merged["h2h_games"].fillna(0) >= 3).astype(int)
+
+    drop_cols = [c for c in merged.columns if c.endswith("__api50")]
+    drop_cols.extend(
+        c for c in [
+            "visible_games_a", "visible_games_b",
+            "act_games_30d_a", "act_games_60d_a",
+            "act_games_30d_b", "act_games_60d_b",
+        ]
+        if c in merged.columns
+    )
+    if drop_cols:
+        merged = merged.drop(columns=drop_cols)
+    return merged
+
+
+def apply_api_cap_p1_p3_p4_p5_overrides(df: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    return apply_api50_p1_p3_p4_p5_overrides(df, overrides)
+
+
+# Backward-compatible aliases while the experiment entrypoint settles on the
+# P1/P3/P4/P5 naming used in the comparison spec.
+def build_api50_p1_p4_p5_overrides(conn) -> pd.DataFrame:
+    return build_api50_p1_p3_p4_p5_overrides(conn)
+
+
+def apply_api50_p1_p4_p5_overrides(df: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    return apply_api50_p1_p3_p4_p5_overrides(df, overrides)
+
+
+# ── recent-only base overrides + full-history career block ───────────────────
+#
+# These power the "historic integration" experiment
+# (scripts/experiments/compare_historic_integration.py).
+#
+#   build_recent_only_base_overrides() caps the BASE history-derived counts
+#   (lifetime / season / civ / map games+wins) to each player's last N prior
+#   games — an honest "one aoe4world page" mock. Combined with the existing
+#   build_api_cap_p1_p3_p4_p5_overrides(), the whole feature set then reflects
+#   only the recent window (MMR/rating are retained — the API returns them
+#   per game).
+#
+#   build_career_block() adds full-history career summaries as SEPARATE columns
+#   (peak/avg MMR, career WR, civ proficiency, form-vs-career), standing in for
+#   a periodically-refreshed career-summary cache. These complement, rather than
+#   replace, the recent-window signal.
+
+# Base raw count columns recomputed under the recent-window cap.
+_RECENT_ONLY_BASE_COLS = [
+    "games_lifetime_a", "wins_lifetime_a",
+    "games_season_a", "wins_season_a",
+    "civ_games_a", "civ_wins_a",
+    "map_games_a", "map_wins_a",
+    "games_lifetime_b", "wins_lifetime_b",
+    "games_season_b", "wins_season_b",
+    "civ_games_b", "civ_wins_b",
+    "map_games_b", "map_wins_b",
+]
+
+
+def build_recent_only_base_overrides(conn, visible_match_cap: int) -> pd.DataFrame:
+    """
+    Return one row per training_features game_id with the BASE history counts
+    (lifetime / season / civ / map games+wins) recomputed from only each
+    player's last `visible_match_cap` prior games.
+
+    Mirrors the last-N visibility of a single aoe4world recent-games page, the
+    same window semantics used by build_api_cap_p1_p3_p4_p5_overrides. The
+    `days_since_*` features need no override (the most recent prior game is
+    always inside the window). MMR/rating are likewise untouched.
+
+    training_features and player_stats must already exist.
+    """
+    if visible_match_cap <= 0:
+        raise ValueError("visible_match_cap must be positive")
+    query = """
+    WITH ordered AS (
+        SELECT
+            ps.game_id,
+            ps.profile_id,
+            ps.result::INT AS result,
+            ps.civ,
+            ps.map,
+            ps.season,
+            ROW_NUMBER() OVER (
+                PARTITION BY ps.profile_id
+                ORDER BY ps.started_at, ps.game_id
+            ) AS seq
+        FROM player_stats ps
+    ),
+    side_a AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS games_lifetime_a,
+            COALESCE(SUM(prev.result), 0) AS wins_lifetime_a,
+            COUNT(prev.game_id) FILTER (WHERE prev.season = tf.season) AS games_season_a,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.season = tf.season), 0) AS wins_season_a,
+            COUNT(prev.game_id) FILTER (WHERE prev.civ = tf.civ_a) AS civ_games_a,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.civ = tf.civ_a), 0) AS civ_wins_a,
+            COUNT(prev.game_id) FILTER (WHERE prev.map = tf.map) AS map_games_a,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.map = tf.map), 0) AS map_wins_a
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_a = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_a
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, cur.seq
+    ),
+    side_b AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS games_lifetime_b,
+            COALESCE(SUM(prev.result), 0) AS wins_lifetime_b,
+            COUNT(prev.game_id) FILTER (WHERE prev.season = tf.season) AS games_season_b,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.season = tf.season), 0) AS wins_season_b,
+            COUNT(prev.game_id) FILTER (WHERE prev.civ = tf.civ_b) AS civ_games_b,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.civ = tf.civ_b), 0) AS civ_wins_b,
+            COUNT(prev.game_id) FILTER (WHERE prev.map = tf.map) AS map_games_b,
+            COALESCE(SUM(prev.result) FILTER (WHERE prev.map = tf.map), 0) AS map_wins_b
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_b = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_b
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, cur.seq
+    )
+    SELECT
+        tf.game_id,
+        side_a.* EXCLUDE (game_id),
+        side_b.* EXCLUDE (game_id)
+    FROM training_features tf
+    LEFT JOIN side_a ON tf.game_id = side_a.game_id
+    LEFT JOIN side_b ON tf.game_id = side_b.game_id
+    ORDER BY tf.game_id
+    """
+    return conn.execute(query, {"visible_match_cap": visible_match_cap}).df()
+
+
+def apply_recent_only_base_overrides(df: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    """
+    Overwrite the base history-count columns with their recent-window values and
+    recompute the base derived features (overall_wr, season_wr, civ_wr, map_wr,
+    games_diff, wr_diff, new-player flags) from the capped counts.
+    """
+    from .features import _add_derived_features
+
+    merged = df.merge(overrides, on="game_id", how="left", suffixes=("", "__cap"))
+    for col in _RECENT_ONLY_BASE_COLS:
+        cap_col = f"{col}__cap"
+        if cap_col in merged.columns:
+            merged[col] = merged[cap_col].fillna(0)
+    drop_cols = [c for c in merged.columns if c.endswith("__cap")]
+    if drop_cols:
+        merged = merged.drop(columns=drop_cols)
+    # Regenerate base derived features from the now-capped raw counts.
+    merged = _add_derived_features(merged)
+    return merged
+
+
+# Raw career columns emitted by build_career_block (joined, not overwritten).
+_CAREER_RAW_COLS = [
+    "career_games_a", "career_wins_a", "career_civ_games_a", "career_civ_wins_a",
+    "peak_mmr_a", "career_avg_mmr_a",
+    "career_games_b", "career_wins_b", "career_civ_games_b", "career_civ_wins_b",
+    "peak_mmr_b", "career_avg_mmr_b",
+]
+
+
+def build_career_block(conn) -> pd.DataFrame:
+    """
+    Return one row per training_features game_id with FULL-HISTORY career
+    summaries for both players, computed leakage-free (prior games only).
+
+    These survive the recent-window cap and stand in for a stored, periodically
+    refreshed career-summary cache:
+      - career_games / career_wins  → smoothed career win rate
+      - career_civ_games / career_civ_wins → smoothed career civ win rate
+      - peak_mmr   = max prior MMR (skill ceiling)
+      - career_avg_mmr = mean prior MMR (skill norm)
+
+    player_stats already carries leakage-safe lifetime/civ cumulative counts, so
+    only peak/avg MMR need fresh window functions.
+    """
+    query = """
+    WITH career AS (
+        SELECT
+            game_id,
+            profile_id,
+            games_lifetime_before AS career_games,
+            wins_lifetime_before  AS career_wins,
+            civ_games_before      AS career_civ_games,
+            civ_wins_before       AS career_civ_wins,
+            MAX(mmr) OVER w AS peak_mmr,
+            AVG(mmr) OVER w AS career_avg_mmr
+        FROM player_stats
+        WINDOW w AS (
+            PARTITION BY profile_id
+            ORDER BY started_at, game_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        )
+    )
+    SELECT
+        tf.game_id,
+        ca.career_games     AS career_games_a,
+        ca.career_wins      AS career_wins_a,
+        ca.career_civ_games AS career_civ_games_a,
+        ca.career_civ_wins  AS career_civ_wins_a,
+        ca.peak_mmr         AS peak_mmr_a,
+        ca.career_avg_mmr   AS career_avg_mmr_a,
+        cb.career_games     AS career_games_b,
+        cb.career_wins      AS career_wins_b,
+        cb.career_civ_games AS career_civ_games_b,
+        cb.career_civ_wins  AS career_civ_wins_b,
+        cb.peak_mmr         AS peak_mmr_b,
+        cb.career_avg_mmr   AS career_avg_mmr_b
+    FROM training_features tf
+    LEFT JOIN career ca ON ca.game_id = tf.game_id AND ca.profile_id = tf.profile_id_a
+    LEFT JOIN career cb ON cb.game_id = tf.game_id AND cb.profile_id = tf.profile_id_b
+    ORDER BY tf.game_id
+    """
+    return conn.execute(query).df()
+
+
+def apply_career_block(df: pd.DataFrame, career: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge full-history career columns and derive the modelled CAREER_FEATURES:
+    smoothed career WR, civ WR, current-MMR-vs-peak/norm gaps, recent-form-minus-
+    career delta, and cross-player diffs.
+
+    Requires P3 `recent_wr_20_{a,b}` to already be present (adjusted_form family)
+    for the form-vs-career deltas.
+    """
+    merged = df.merge(career, on="game_id", how="left")
+
+    for side in ("a", "b"):
+        merged[f"career_wr_{side}"] = _smooth(
+            merged[f"career_wins_{side}"].fillna(0),
+            merged[f"career_games_{side}"].fillna(0),
+        )
+        merged[f"career_civ_wr_{side}"] = _smooth(
+            merged[f"career_civ_wins_{side}"].fillna(0),
+            merged[f"career_civ_games_{side}"].fillna(0),
+        )
+        merged[f"mmr_vs_peak_{side}"] = merged[f"mmr_{side}"] - merged[f"peak_mmr_{side}"]
+        merged[f"mmr_vs_career_avg_{side}"] = merged[f"mmr_{side}"] - merged[f"career_avg_mmr_{side}"]
+        if f"recent_wr_20_{side}" in merged.columns:
+            merged[f"form_vs_career_{side}"] = (
+                merged[f"recent_wr_20_{side}"] - merged[f"career_wr_{side}"]
+            )
+
+    merged["career_wr_diff"] = merged["career_wr_a"] - merged["career_wr_b"]
+    merged["career_games_diff"] = merged["career_games_a"].fillna(0) - merged["career_games_b"].fillna(0)
+    merged["peak_mmr_diff"] = merged["peak_mmr_a"] - merged["peak_mmr_b"]
+    merged["career_avg_mmr_diff"] = merged["career_avg_mmr_a"] - merged["career_avg_mmr_b"]
+
+    # Drop the intermediate raw win counts; keep career_games (experience signal).
+    drop_cols = [
+        "career_wins_a", "career_civ_games_a", "career_civ_wins_a",
+        "career_wins_b", "career_civ_games_b", "career_civ_wins_b",
+    ]
+    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+    return merged
+
+
+# ── window-temporal block (computable from the aoe4world recent-games page) ──
+#
+# Every feature here is recoverable from ONLY the last N games returned by the
+# aoe4world API (each game carries started_at), so no DB career cache is needed.
+# Captures HOW the recent window is distributed in calendar time — a player who
+# played their last 30 games in 3 days (hot/grinding) looks identical to one who
+# took 8 months (rusty) on every existing recency feature except `days_since`.
+
+def build_window_temporal_overrides(conn, visible_match_cap: int) -> pd.DataFrame:
+    """
+    Return one row per training_features game_id with calendar-time descriptors
+    of each player's last `visible_match_cap` prior games:
+      - wt_visible          : visible game count (helper; dropped after derive)
+      - window_span_days    : days from the oldest visible game to the current match
+      - gap_mean_window     : mean days between consecutive games inside the window
+      - gap_max_window      : longest idle gap inside the window (return-from-break)
+      - wt_act_7d / wt_act_30d : games played in the last 7 / 30 calendar days
+
+    Uses player_stats.days_since_last_game (precomputed gap-since-previous), so the
+    per-game gaps are a cheap aggregate rather than a correlated subquery.
+    """
+    if visible_match_cap <= 0:
+        raise ValueError("visible_match_cap must be positive")
+    query = """
+    WITH ordered AS (
+        SELECT
+            ps.game_id,
+            ps.profile_id,
+            ps.started_at,
+            ps.days_since_last_game,
+            ROW_NUMBER() OVER (
+                PARTITION BY ps.profile_id
+                ORDER BY ps.started_at, ps.game_id
+            ) AS seq
+        FROM player_stats ps
+    ),
+    side_a AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS wt_visible_a,
+            DATEDIFF('day', MIN(prev.started_at), tf.started_at) AS window_span_days_a,
+            AVG(prev.days_since_last_game) AS gap_mean_window_a,
+            MAX(prev.days_since_last_game) AS gap_max_window_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ) AS wt_act_7d_a,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS wt_act_30d_a
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_a = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_a
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, tf.started_at, cur.seq
+    ),
+    side_b AS (
+        SELECT
+            tf.game_id,
+            COUNT(prev.game_id) AS wt_visible_b,
+            DATEDIFF('day', MIN(prev.started_at), tf.started_at) AS window_span_days_b,
+            AVG(prev.days_since_last_game) AS gap_mean_window_b,
+            MAX(prev.days_since_last_game) AS gap_max_window_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '7 days'
+            ) AS wt_act_7d_b,
+            COUNT(prev.game_id) FILTER (
+                WHERE prev.started_at >= tf.started_at - INTERVAL '30 days'
+            ) AS wt_act_30d_b
+        FROM training_features tf
+        JOIN ordered cur
+          ON tf.game_id = cur.game_id
+         AND tf.profile_id_b = cur.profile_id
+        LEFT JOIN ordered prev
+          ON prev.profile_id = tf.profile_id_b
+         AND prev.seq BETWEEN cur.seq - $visible_match_cap AND cur.seq - 1
+        GROUP BY tf.game_id, tf.started_at, cur.seq
+    )
+    SELECT
+        tf.game_id,
+        side_a.* EXCLUDE (game_id),
+        side_b.* EXCLUDE (game_id)
+    FROM training_features tf
+    LEFT JOIN side_a ON tf.game_id = side_a.game_id
+    LEFT JOIN side_b ON tf.game_id = side_b.game_id
+    ORDER BY tf.game_id
+    """
+    return conn.execute(query, {"visible_match_cap": visible_match_cap}).df()
+
+
+def apply_window_temporal_overrides(df: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    """Merge window-temporal columns, derive density and cross-player diffs."""
+    merged = df.merge(overrides, on="game_id", how="left")
+    for side in ("a", "b"):
+        span = merged[f"window_span_days_{side}"].fillna(0).clip(lower=0)
+        visible = merged[f"wt_visible_{side}"].fillna(0)
+        merged[f"games_per_day_window_{side}"] = visible / (span + 1.0)
+
+    merged["window_span_days_diff"] = (
+        merged["window_span_days_a"].fillna(0) - merged["window_span_days_b"].fillna(0)
+    )
+    merged["games_per_day_window_diff"] = (
+        merged["games_per_day_window_a"] - merged["games_per_day_window_b"]
+    )
+    merged["gap_max_window_diff"] = (
+        merged["gap_max_window_a"].fillna(0) - merged["gap_max_window_b"].fillna(0)
+    )
+    merged["wt_act_30d_diff"] = (
+        merged["wt_act_30d_a"].fillna(0) - merged["wt_act_30d_b"].fillna(0)
+    )
+
+    merged = merged.drop(columns=[c for c in ("wt_visible_a", "wt_visible_b") if c in merged.columns])
+    return merged
 
 
 # ── feature name lists (for model.py and ablation) ───────────────────────────
@@ -1125,12 +1819,12 @@ P2_FEATURES = [
 ]
 
 P3_FEATURES = [
-    "recent_n_5_a", "recent_w_5_a", "recent_wr_5_a",
-    "recent_n_10_a", "recent_w_10_a", "recent_wr_10_a",
-    "recent_n_20_a", "recent_w_20_a", "recent_wr_20_a",
-    "recent_n_5_b", "recent_w_5_b", "recent_wr_5_b",
-    "recent_n_10_b", "recent_w_10_b", "recent_wr_10_b",
-    "recent_n_20_b", "recent_w_20_b", "recent_wr_20_b",
+    "recent_w_5_a", "recent_wr_5_a",
+    "recent_w_10_a", "recent_wr_10_a",
+    "recent_w_20_a", "recent_wr_20_a",
+    "recent_w_5_b", "recent_wr_5_b",
+    "recent_w_10_b", "recent_wr_10_b",
+    "recent_w_20_b", "recent_wr_20_b",
     "recent_wr_5_diff", "recent_wr_10_diff", "recent_wr_20_diff",
 ]
 
@@ -1146,7 +1840,7 @@ P4_FEATURES = [
 ]
 
 P5_FEATURES = [
-    "h2h_games", "h2h_wins_a", "h2h_wr_a", "h2h_has_data",
+    "h2h_games", "h2h_wins_a", "h2h_wr_a",
 ]
 
 P8_FEATURES = [
@@ -1191,9 +1885,35 @@ P7_FEATURES = [
     "missing_patch_start",
 ]
 
+# Full-history career-summary block (historic-integration experiment). Added to
+# the matrix only by apply_career_block(); absent from normal training runs, so
+# the trainer's `[c for c in ALL_FEATURES if c in df.columns]` filter skips them.
+CAREER_FEATURES = [
+    "career_games_a", "career_wr_a", "career_civ_wr_a",
+    "peak_mmr_a", "career_avg_mmr_a",
+    "mmr_vs_peak_a", "mmr_vs_career_avg_a", "form_vs_career_a",
+    "career_games_b", "career_wr_b", "career_civ_wr_b",
+    "peak_mmr_b", "career_avg_mmr_b",
+    "mmr_vs_peak_b", "mmr_vs_career_avg_b", "form_vs_career_b",
+    "career_wr_diff", "career_games_diff", "peak_mmr_diff", "career_avg_mmr_diff",
+]
+
+# Calendar-time descriptors of the recent window — recoverable from the
+# aoe4world recent-games page alone (no DB cache). Added only by
+# apply_window_temporal_overrides(); absent from normal runs (selector skips them).
+WINDOW_TEMPORAL_FEATURES = [
+    "window_span_days_a", "gap_mean_window_a", "gap_max_window_a",
+    "wt_act_7d_a", "wt_act_30d_a", "games_per_day_window_a",
+    "window_span_days_b", "gap_mean_window_b", "gap_max_window_b",
+    "wt_act_7d_b", "wt_act_30d_b", "games_per_day_window_b",
+    "window_span_days_diff", "games_per_day_window_diff",
+    "gap_max_window_diff", "wt_act_30d_diff",
+]
+
 ALL_EXTRA_FEATURES = (
     P1_FEATURES + P2_FEATURES + P3_FEATURES + P4_FEATURES +
-    P5_FEATURES + P6_FEATURES + P7_FEATURES + P8_FEATURES + P9_FEATURES
+    P5_FEATURES + P6_FEATURES + P7_FEATURES + P8_FEATURES + P9_FEATURES +
+    CAREER_FEATURES + WINDOW_TEMPORAL_FEATURES
 )
 
 FAMILY_FEATURES: dict[str, list[str]] = {
@@ -1210,7 +1930,10 @@ FAMILY_FEATURES: dict[str, list[str]] = {
 
 # Families that showed no improvement on S10+S11 ablation (Brier Δ < 0.001).
 # Excluded from --add-all-families but still callable explicitly.
-DISABLED_FAMILIES: frozenset[str] = frozenset({"map_archetypes", "patch_priors"})
+DISABLED_FAMILIES: frozenset[str] = frozenset({
+    "map_archetypes", "patch_priors",          # P6/P7: negligible lift
+    "mmr_trend", "low_history_detail", "activity_session",  # P2/P8/P9: zero or negative marginal value
+})
 
 #: New map taxonomy columns that need LightGBM categorical treatment
 P6_CATEGORICAL_FEATURES = [

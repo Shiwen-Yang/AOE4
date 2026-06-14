@@ -3,6 +3,8 @@ import pandas as pd
 from pathlib import Path
 from .config import DB_PATH
 
+DUCKDB_TEMP_DIR = Path("/tmp/duckdb_spill")
+
 GAMES_DDL = """
 CREATE TABLE IF NOT EXISTS games (
     game_id     BIGINT PRIMARY KEY,
@@ -48,10 +50,11 @@ INDEXES = [
 
 def get_conn(db_path: Path | str | None = None, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     path = str(db_path or DB_PATH)
+    DUCKDB_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(path, read_only=read_only)
     conn.execute("SET threads TO 4")
     conn.execute("SET memory_limit = '8GB'")
-    conn.execute("SET temp_directory = '/home/shiwen/tmp/duckdb_spill'")
+    conn.execute(f"SET temp_directory = '{DUCKDB_TEMP_DIR}'")
     return conn
 
 

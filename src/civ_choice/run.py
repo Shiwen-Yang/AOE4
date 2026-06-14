@@ -7,39 +7,11 @@ Usage:
     python3 -m civ_choice.run --no-shap
 """
 import argparse
-import sys
-from pathlib import Path
-
-import numpy as np
-
-_REPO = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO))
-
-from aoe4_predict.config import DB_PATH, DEFAULT_TRAIN_SEASONS
-from aoe4_predict.db import get_conn
-
-from civ_choice.dataset import build_tables, load_training_matrix, validate_dataset
-from civ_choice.features import add_derived_features
-from civ_choice.baselines import (
-    GlobalPickRateBaseline,
-    LifetimeFreqBaseline,
-    Recent30dBaseline,
-    MapSpecificBaseline,
-    LastCivBaseline,
-    normalize_within_group,
-)
-from civ_choice.model import (
-    temporal_split,
-    train_lgbm,
-    normalize_predictions,
-    compute_group_metrics,
-    compute_subgroup_metrics,
-    compute_shap,
-)
-from civ_choice.report import generate_report, write_report, REPORT_PATH
 
 
 def parse_args() -> argparse.Namespace:
+    from aoe4_predict.config import DB_PATH, DEFAULT_TRAIN_SEASONS
+
     p = argparse.ArgumentParser(description="AOE4 civ-choice prediction")
     p.add_argument("--db", default=str(DB_PATH))
     p.add_argument(
@@ -58,6 +30,33 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    import numpy as np
+
+    from aoe4_predict.db import get_conn, table_exists
+    from civ_choice.dataset import build_tables, load_training_matrix, validate_dataset
+    from civ_choice.features import add_derived_features
+    from civ_choice.baselines import (
+        GlobalPickRateBaseline,
+        LifetimeFreqBaseline,
+        Recent30dBaseline,
+        MapSpecificBaseline,
+        LastCivBaseline,
+        normalize_within_group,
+    )
+    from civ_choice.model import (
+        temporal_split,
+        train_lgbm,
+        save_model,
+        normalize_predictions,
+        normalize_raw_scores_with_temperature,
+        fit_temperature,
+        compute_group_metrics,
+        compute_subgroup_metrics,
+        compute_shap,
+    )
+    from civ_choice.report import generate_report, write_report, REPORT_PATH
+
     seasons = [int(s.strip()) for s in args.seasons.split(",")]
 
     print("=" * 60)
@@ -68,7 +67,6 @@ def main() -> None:
 
     # ── 1. Build / load dataset ───────────────────────────────────────────
     conn = get_conn(args.db)
-    from aoe4_predict.db import table_exists
 
     if args.rebuild or not table_exists(conn, "civ_choice_training_matrix"):
         build_tables(conn, seasons)
@@ -134,24 +132,52 @@ def main() -> None:
 
         # Compare renorm vs softmax on validation set
         from civ_choice.features import prepare_X
-        raw_val = model.predict_proba(prepare_X(valid_df))[:, 1]
+        X_valid = prepare_X(valid_df)
+        raw_val = model.predict_proba(X_valid)[:, 1]
+        raw_score_val = model.predict(X_valid, raw_score=True)
         norm_renorm = normalize_predictions(valid_df, raw_val, method="renorm")
         norm_softmax = normalize_predictions(valid_df, raw_val, method="softmax")
+        temperature, temp_valid_nll = fit_temperature(valid_df, raw_score_val)
+        norm_temp = normalize_raw_scores_with_temperature(valid_df, raw_score_val, temperature)
         m_renorm = compute_group_metrics(valid_df, norm_renorm)
         m_softmax = compute_group_metrics(valid_df, norm_softmax)
-        normalization_winner = (
-            "renorm" if m_renorm.get("log_loss", 99) <= m_softmax.get("log_loss", 99) else "softmax"
+        m_temp = compute_group_metrics(valid_df, norm_temp)
+        normalization_options = {
+            "renorm": m_renorm,
+            "softmax": m_softmax,
+            "temperature": m_temp,
+        }
+        normalization_winner = min(
+            normalization_options,
+            key=lambda name: normalization_options[name].get("log_loss", 99),
         )
         print(f"\n  Normalization: renorm LogLoss={m_renorm.get('log_loss', 99):.4f}  "
-              f"softmax LogLoss={m_softmax.get('log_loss', 99):.4f}  → using {normalization_winner}")
+              f"softmax LogLoss={m_softmax.get('log_loss', 99):.4f}  "
+              f"temperature(T={temperature:.3f}) LogLoss={temp_valid_nll:.4f}  "
+              f"→ using {normalization_winner}")
 
-        raw_test = model.predict_proba(prepare_X(test_df))[:, 1]
-        norm_test = normalize_predictions(test_df, raw_test, method=normalization_winner)
+        X_test = prepare_X(test_df)
+        raw_test = model.predict_proba(X_test)[:, 1]
+        if normalization_winner == "temperature":
+            raw_score_test = model.predict(X_test, raw_score=True)
+            norm_test = normalize_raw_scores_with_temperature(test_df, raw_score_test, temperature)
+        else:
+            norm_test = normalize_predictions(test_df, raw_test, method=normalization_winner)
         lgbm_m = compute_group_metrics(test_df, norm_test)
         all_metrics["LightGBM"] = lgbm_m
         print(f"\n  LightGBM test:  Top1={lgbm_m.get('top1_acc', 0):.3f}  "
               f"Top3={lgbm_m.get('top3_acc', 0):.3f}  "
               f"LogLoss={lgbm_m.get('log_loss', 99):.4f}")
+        save_model(
+            model,
+            meta={
+                "seasons": seasons,
+                "normalization": normalization_winner,
+                "temperature": temperature if normalization_winner == "temperature" else None,
+                "metrics": {"test": lgbm_m, "validation_normalization": normalization_options},
+            },
+        )
+        print("  Saved LightGBM model to models/civ_choice/lgbm_civ_choice.txt")
 
         subgroup_metrics = compute_subgroup_metrics(test_df, norm_test)
         print("\n  Subgroup metrics (test set):")

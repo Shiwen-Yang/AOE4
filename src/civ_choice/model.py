@@ -1,9 +1,19 @@
-"""LightGBM model, temporal split, and group-level metrics for civ-choice prediction."""
+"""LightGBM model, temporal split, persistence, and group-level metrics."""
+import json
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
+from aoe4_predict.config import BASE_DIR
+
 from .features import ALL_FEATURES, CONTEXT_FEATURES, prepare_X
+
+MODEL_DIR = BASE_DIR / "models" / "civ_choice"
+MODEL_PATH = MODEL_DIR / "lgbm_civ_choice.txt"
+MODEL_META_PATH = MODEL_DIR / "lgbm_civ_choice_meta.json"
 
 DEFAULT_PARAMS = {
     "objective": "binary",
@@ -71,6 +81,64 @@ def normalize_predictions(
         lambda x: x / x.sum() if x.sum() > 0 else np.ones(len(x)) / len(x)
     )
     return tmp["_norm"].values
+
+
+def normalize_raw_scores_with_temperature(
+    df: pd.DataFrame,
+    raw_scores: np.ndarray,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Group-softmax LightGBM raw margins after temperature scaling.
+
+    Temperature > 1 softens candidate probabilities; temperature < 1 sharpens
+    them. Probabilities are normalized within each (game_id, profile_id) group.
+    """
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+
+    tmp = df[["game_id", "profile_id"]].copy()
+    tmp["_scaled"] = np.asarray(raw_scores, dtype=float) / temperature
+    group_cols = ["game_id", "profile_id"]
+    group_max = tmp.groupby(group_cols)["_scaled"].transform("max")
+    tmp["_exp"] = np.exp(np.clip(tmp["_scaled"] - group_max, -50, 50))
+    group_sum = tmp.groupby(group_cols)["_exp"].transform("sum")
+    tmp["_norm"] = np.where(group_sum > 0, tmp["_exp"] / group_sum, 0.0)
+    return tmp["_norm"].values
+
+
+def _temperature_nll(df: pd.DataFrame, raw_scores: np.ndarray, temperature: float) -> float:
+    probs = normalize_raw_scores_with_temperature(df, raw_scores, temperature)
+    chosen = df["target"].values == 1
+    return float(-np.log(np.clip(probs[chosen], 1e-12, 1.0)).mean())
+
+
+def fit_temperature(
+    df: pd.DataFrame,
+    raw_scores: np.ndarray,
+    low: float = 0.05,
+    high: float = 10.0,
+    iterations: int = 40,
+) -> tuple[float, float]:
+    """Fit a single temperature on validation data by minimizing group NLL."""
+    phi = (1 + 5 ** 0.5) / 2
+    a, b = low, high
+    c = b - (b - a) / phi
+    d = a + (b - a) / phi
+    fc = _temperature_nll(df, raw_scores, c)
+    fd = _temperature_nll(df, raw_scores, d)
+
+    for _ in range(iterations):
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - (b - a) / phi
+            fc = _temperature_nll(df, raw_scores, c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + (b - a) / phi
+            fd = _temperature_nll(df, raw_scores, d)
+
+    temperature = (a + b) / 2
+    return temperature, _temperature_nll(df, raw_scores, temperature)
 
 
 def compute_group_metrics(
@@ -187,6 +255,58 @@ def train_lgbm(
         ],
     )
     return model
+
+
+def save_model(
+    model: lgb.LGBMClassifier | lgb.Booster,
+    model_path: Path | str | None = None,
+    meta_path: Path | str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist the trained civ-choice LightGBM model and metadata."""
+    model_path = Path(model_path) if model_path is not None else MODEL_PATH
+    meta_path = Path(meta_path) if meta_path is not None else MODEL_META_PATH
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+
+    booster = model.booster_ if hasattr(model, "booster_") else model
+    booster.save_model(str(model_path))
+
+    model_meta: dict[str, Any] = {
+        "feature_cols": ALL_FEATURES,
+        "cat_features": CONTEXT_FEATURES,
+        "n_trees": booster.num_trees(),
+    }
+    if hasattr(model, "best_iteration_"):
+        model_meta["best_iteration"] = model.best_iteration_
+    if hasattr(model, "get_params"):
+        model_meta["params"] = model.get_params()
+    if meta:
+        model_meta.update(meta)
+
+    meta_path.write_text(json.dumps(model_meta, indent=2, default=str))
+    return model_meta
+
+
+def load_model(
+    model_path: Path | str | None = None,
+    meta_path: Path | str | None = None,
+) -> tuple[lgb.Booster, dict[str, Any]]:
+    """Load the persisted civ-choice LightGBM model and metadata."""
+    model_path = Path(model_path) if model_path is not None else MODEL_PATH
+    meta_path = Path(meta_path) if meta_path is not None else MODEL_META_PATH
+    model = lgb.Booster(model_file=str(model_path))
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    return model, meta
+
+
+def predict_candidate_probs(
+    model: lgb.LGBMClassifier | lgb.Booster,
+    X: pd.DataFrame,
+) -> np.ndarray:
+    """Return candidate-level positive-class probabilities for supported models."""
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X)[:, 1]
+    return model.predict(X)
 
 
 def compute_shap(

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoe4"
+version = "0.1.0"
+description = "Age of Empires IV match prediction and analysis tools"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "duckdb",
+    "fastapi",
+    "lightgbm",
+    "numpy",
+    "pandas",
+    "uvicorn[standard]",
+]
+
+[project.scripts]
+aoe4-predict = "aoe4_predict.cli:main"
+civ-choice = "civ_choice.run:main"
+civ-choice-anonymous-opponent = "civ_choice.run_anonymous_opponent:main"
+civ-choice-live-assistant = "civ_choice.run_anonymous_opponent:main"
+civ-choice-live = "civ_choice.live:main"
+ratings-delta = "ratings_delta.run:main"
+realtime-outcome-prediction = "realtime_outcome_prediction.cli:main"
+
+[tool.setuptools]
+packages = [
+    "aoe4_predict",
+    "civ_choice",
+    "player_clustering",
+    "ratings_delta",
+    "realtime_outcome_prediction",
+    "backend",
+    "backend.app",
+    "backend.app.services",
+]
+
+[tool.setuptools.package-dir]
+aoe4_predict = "src/aoe4_predict"
+civ_choice = "src/civ_choice"
+player_clustering = "src/player_clustering"
+ratings_delta = "src/ratings_delta"
+realtime_outcome_prediction = "src/realtime_outcome_prediction"
+backend = "backend"
+"backend.app" = "backend/app"
+"backend.app.services" = "backend/app/services"

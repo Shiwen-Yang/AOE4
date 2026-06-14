@@ -18,33 +18,89 @@ import time
 
 import pandas as pd
 
+RANDOM_CIV = "random_civ"
 
-# ── 1. Full non-randomized player game history ────────────────────────────────
+# ── 1. Full player game history ───────────────────────────────────────────────
 _PLAYER_RAW_GAMES_SQL = """
 CREATE OR REPLACE TABLE player_raw_games AS
+WITH base AS (
+    SELECT
+        p.game_id,
+        p.profile_id,
+        CASE
+            WHEN p.civilization_randomized = TRUE THEN 'random_civ'
+            ELSE p.civilization
+        END                     AS civ,
+        p.result::INT           AS result,
+        p.mmr                   AS player_mmr,
+        p.rating                AS player_rating,
+        g.started_at,
+        g.season,
+        g.patch,
+        g.map
+    FROM participants p
+    JOIN games g ON p.game_id = g.game_id
+    WHERE g.kind IN ('rm_1v1', 'rm_solo')
+      AND p.result IS NOT NULL
+      AND p.civilization IS NOT NULL
+      AND g.started_at IS NOT NULL
+),
+marked AS (
+    SELECT
+        *,
+        CASE
+            WHEN civ = LAG(civ) OVER (
+                PARTITION BY profile_id
+                ORDER BY started_at, game_id
+            )
+            THEN 0
+            ELSE 1
+        END AS run_start
+    FROM base
+),
+runs AS (
+    SELECT
+        *,
+        SUM(run_start) OVER (
+            PARTITION BY profile_id
+            ORDER BY started_at, game_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS civ_run_id
+    FROM marked
+),
+positioned AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY profile_id, civ_run_id
+            ORDER BY started_at, game_id
+        ) AS current_civ_streak_len
+    FROM runs
+)
 SELECT
-    p.game_id,
-    p.profile_id,
-    p.civilization          AS civ,
-    p.result::INT           AS result,
-    p.mmr                   AS player_mmr,
-    p.rating                AS player_rating,
-    g.started_at,
-    g.season,
-    g.patch,
-    g.map,
+    game_id,
+    profile_id,
+    civ,
+    result,
+    player_mmr,
+    player_rating,
+    started_at,
+    season,
+    patch,
+    map,
     -- Civ played in the immediately preceding game (for candidate_is_last_civ)
-    LAG(p.civilization) OVER (
-        PARTITION BY p.profile_id
-        ORDER BY g.started_at, p.game_id
-    )                       AS prev_civ
-FROM participants p
-JOIN games g ON p.game_id = g.game_id
-WHERE g.kind IN ('rm_1v1', 'rm_solo')
-  AND p.result IS NOT NULL
-  AND p.civilization IS NOT NULL
-  AND p.civilization_randomized = FALSE
-  AND g.started_at IS NOT NULL
+    LAG(civ) OVER (
+        PARTITION BY profile_id
+        ORDER BY started_at, game_id
+    ) AS prev_civ,
+    COALESCE(
+        LAG(current_civ_streak_len) OVER (
+            PARTITION BY profile_id
+            ORDER BY started_at, game_id
+        ),
+        0
+    ) AS prev_civ_streak_len
+FROM positioned
 """
 
 # ── 2. Per-civ cumulative stats (for ASOF lifetime lookup) ───────────────────
@@ -73,16 +129,19 @@ SELECT
 FROM player_raw_games
 """
 
-# ── 3. First time each civ appeared in data ───────────────────────────────────
+# ── 3. First time each modeled civ option appeared in data ────────────────────
 _CIV_FIRST_SEEN_SQL = """
 CREATE OR REPLACE TABLE civ_first_seen AS
 SELECT
-    civilization    AS civ,
+    CASE
+        WHEN civilization_randomized = TRUE THEN 'random_civ'
+        ELSE civilization
+    END             AS civ,
     MIN(started_at) AS first_seen_at
 FROM participants p
 JOIN games g ON p.game_id = g.game_id
 WHERE civilization IS NOT NULL
-GROUP BY civilization
+GROUP BY 1
 """
 
 # ── 4. Global civ pick rates by season ───────────────────────────────────────
@@ -126,6 +185,7 @@ SELECT
     prg.player_mmr,
     prg.player_rating,
     prg.prev_civ,
+    prg.prev_civ_streak_len,
     prg.started_at,
     prg.season,
     prg.patch,
@@ -146,6 +206,7 @@ SELECT
     pg.player_mmr,
     pg.player_rating,
     pg.prev_civ,
+    pg.prev_civ_streak_len,
     pg.started_at,
     pg.season,
     pg.patch,
@@ -175,6 +236,10 @@ SELECT
     cr.player_mmr,
     cr.player_rating,
     cr.result,
+    COALESCE(cr.prev_civ_streak_len, 0) AS player_current_streak_len,
+    CASE WHEN cr.candidate_civ = cr.prev_civ
+         THEN COALESCE(cr.prev_civ_streak_len, 0)
+         ELSE 0 END                  AS candidate_current_streak_len,
 
     -- ── Lifetime cumulative stats for this candidate civ ─────────────────
     COALESCE(cum.civ_game_num, 0)       AS cand_games_lifetime,
@@ -186,6 +251,18 @@ SELECT
     -- ── 30-day stats ─────────────────────────────────────────────────────
     COALESCE(rec30.games_30d, 0)        AS cand_games_30d,
     COALESCE(rec30.wins_30d, 0)         AS cand_wins_30d,
+    COALESCE(recseq.games_last_1_games, 0) AS cand_games_last_1_games,
+    COALESCE(recseq.games_last_2_games, 0) AS cand_games_last_2_games,
+    COALESCE(recseq.games_last_3_games, 0) AS cand_games_last_3_games,
+    COALESCE(recseq.games_last_5_games, 0) AS cand_games_last_5_games,
+    COALESCE(recseq.games_last_10_games, 0) AS cand_games_last_10_games,
+    COALESCE(rec20g.games_last_20_games, 0) AS cand_games_last_20_games,
+    COALESCE(recseq.candidate_last_played_position, 21) AS candidate_last_played_position,
+    COALESCE(recseq.switch_count_last_10_games, 0) AS recent_civ_switch_count_last_10_games,
+    COALESCE(recseq.unique_civs_last_10_games, 0) AS recent_unique_civs_last_10_games,
+    COALESCE(recseq.entropy_last_10_games, 0) AS recent_entropy_last_10_games,
+    COALESCE(recseq.games_last_20_same_map, 0) AS cand_games_last_20_same_map,
+    COALESCE(recseq.player_games_last_20_same_map, 0) AS player_games_last_20_same_map,
 
     -- ── Patch stats ──────────────────────────────────────────────────────
     COALESCE(recpatch.games_patch, 0)   AS cand_games_this_patch,
@@ -202,9 +279,11 @@ SELECT
     COALESCE(pov.games_this_map, 0)     AS player_games_this_map,
 
     -- ── Global pick rates ────────────────────────────────────────────────
-    COALESCE(gpr_ps.pick_rate, 1.0/18)  AS cand_global_pr_prev_season,
-    COALESCE(gpr_pp.pick_rate, 1.0/18)  AS cand_global_pr_prev_patch,
-    COALESCE(gpr_cs.pick_rate, 1.0/18)  AS cand_global_pr_this_season
+    COALESCE(gpr_ps.pick_rate, 1.0/19)  AS cand_global_pr_prev_season,
+    COALESCE(gpr_pp.pick_rate, 1.0/19)  AS cand_global_pr_prev_patch,
+    COALESCE(gpr_pmb.pick_rate, 1.0/19) AS cand_global_pr_patch_mmr_bucket,
+    COALESCE(gpr_mp.pick_rate, 1.0/19)  AS cand_global_pr_map_patch,
+    COALESCE(gpr_cs.pick_rate, 1.0/19)  AS cand_global_pr_this_season
 
 FROM civ_choice_candidate_rows cr
 
@@ -233,6 +312,84 @@ LEFT JOIN LATERAL (
       AND pcr.started_at < cr.started_at
       AND pcr.started_at >= cr.started_at - INTERVAL '30 days'
 ) rec30 ON TRUE
+
+-- ── Exact last-20-games aggregation ──────────────────────────────────────
+LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS games_last_20_games
+    FROM (
+        SELECT prg.civ
+        FROM player_raw_games prg
+        WHERE prg.profile_id = cr.profile_id
+          AND prg.started_at < cr.started_at
+        ORDER BY prg.started_at DESC, prg.game_id DESC
+        LIMIT 20
+    ) recent_games
+    WHERE recent_games.civ = cr.candidate_civ
+) rec20g ON TRUE
+
+-- ── Recent sequence features ────────────────────────────────────────────
+LEFT JOIN LATERAL (
+    WITH recent AS (
+        SELECT
+            prg.civ,
+            prg.map,
+            ROW_NUMBER() OVER (ORDER BY prg.started_at DESC, prg.game_id DESC) AS rn
+        FROM player_raw_games prg
+        WHERE prg.profile_id = cr.profile_id
+          AND prg.started_at < cr.started_at
+        ORDER BY prg.started_at DESC, prg.game_id DESC
+        LIMIT 20
+    ),
+    recent_with_prev AS (
+        SELECT
+            rn,
+            civ,
+            map,
+            LAG(civ) OVER (ORDER BY rn) AS prev_recent_civ
+        FROM recent
+    ),
+    counts10 AS (
+        SELECT civ, COUNT(*) AS n
+        FROM recent
+        WHERE rn <= 10
+        GROUP BY civ
+    ),
+    totals10 AS (
+        SELECT SUM(n) AS total FROM counts10
+    ),
+    entropy10 AS (
+        SELECT
+            COALESCE(
+                -SUM((n::DOUBLE / NULLIF(total, 0)) * LN(n::DOUBLE / NULLIF(total, 0))),
+                0
+            ) AS entropy
+        FROM counts10, totals10
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE rn <= 1 AND civ = cr.candidate_civ) AS games_last_1_games,
+        COUNT(*) FILTER (WHERE rn <= 2 AND civ = cr.candidate_civ) AS games_last_2_games,
+        COUNT(*) FILTER (WHERE rn <= 3 AND civ = cr.candidate_civ) AS games_last_3_games,
+        COUNT(*) FILTER (WHERE rn <= 5 AND civ = cr.candidate_civ) AS games_last_5_games,
+        COUNT(*) FILTER (WHERE rn <= 10 AND civ = cr.candidate_civ) AS games_last_10_games,
+        COALESCE(MIN(rn) FILTER (WHERE civ = cr.candidate_civ), 21) AS candidate_last_played_position,
+        COUNT(*) FILTER (
+            WHERE rn <= 10
+              AND prev_recent_civ IS NOT NULL
+              AND civ <> prev_recent_civ
+        ) AS switch_count_last_10_games,
+        COUNT(DISTINCT civ) FILTER (WHERE rn <= 10) AS unique_civs_last_10_games,
+        (SELECT entropy FROM entropy10) AS entropy_last_10_games,
+        COUNT(*) FILTER (
+            WHERE rn <= 20
+              AND map = cr.map
+              AND civ = cr.candidate_civ
+        ) AS games_last_20_same_map,
+        COUNT(*) FILTER (
+            WHERE rn <= 20
+              AND map = cr.map
+        ) AS player_games_last_20_same_map
+    FROM recent_with_prev
+) recseq ON TRUE
 
 -- ── Patch aggregation ────────────────────────────────────────────────────
 LEFT JOIN LATERAL (
@@ -286,6 +443,46 @@ LEFT JOIN LATERAL (
     ORDER BY gpr.patch DESC
     LIMIT 1
 ) gpr_pp ON TRUE
+
+-- ── Historical patch × MMR-bucket pick rate before this match ────────────
+LEFT JOIN LATERAL (
+    WITH hist AS (
+        SELECT prg.civ
+        FROM player_raw_games prg
+        WHERE prg.patch = cr.patch
+          AND prg.started_at < cr.started_at
+          AND (
+              CASE
+                  WHEN prg.player_mmr IS NULL THEN 'unknown'
+                  WHEN prg.player_mmr < 1000 THEN 'low'
+                  WHEN prg.player_mmr < 1400 THEN 'mid'
+                  ELSE 'high'
+              END
+          ) = (
+              CASE
+                  WHEN cr.player_mmr IS NULL THEN 'unknown'
+                  WHEN cr.player_mmr < 1000 THEN 'low'
+                  WHEN cr.player_mmr < 1400 THEN 'mid'
+                  ELSE 'high'
+              END
+          )
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE civ = cr.candidate_civ)::DOUBLE
+        / NULLIF(COUNT(*), 0) AS pick_rate
+    FROM hist
+) gpr_pmb ON TRUE
+
+-- ── Historical map × patch pick rate before this match ───────────────────
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*) FILTER (WHERE prg.civ = cr.candidate_civ)::DOUBLE
+        / NULLIF(COUNT(*), 0) AS pick_rate
+    FROM player_raw_games prg
+    WHERE prg.map = cr.map
+      AND prg.patch = cr.patch
+      AND prg.started_at < cr.started_at
+) gpr_mp ON TRUE
 
 -- ── Global pick rate: this season (from prior games — approximate with season total) ──
 LEFT JOIN civ_global_rates_by_season gpr_cs

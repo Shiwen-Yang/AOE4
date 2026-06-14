@@ -34,8 +34,9 @@ from .features_extra import (
 )
 from .model import _predict, _temporal_split, load_model
 
-FIGURES_DIR = Path(__file__).parent.parent / "reports" / "figures"
-REPORT_PATH = Path(__file__).parent.parent / "reports" / "analysis_report.md"
+BASE_DIR = Path(__file__).resolve().parents[2]
+FIGURES_DIR = BASE_DIR / "reports" / "figures"
+REPORT_PATH = BASE_DIR / "reports" / "generated" / "analysis_report.md"
 
 NUMERIC_TOP5_LGBM = [
     "skill_diff",

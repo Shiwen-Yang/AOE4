@@ -6,16 +6,11 @@ All 18×18=324 win-model calls are batched into one predict() call.
 """
 from __future__ import annotations
 
-import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-_REPO = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO))
 
 from aoe4_predict.config import DB_PATH
 from aoe4_predict.db import get_conn

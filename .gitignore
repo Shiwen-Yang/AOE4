@@ -16,22 +16,21 @@ env/
 *.ipynb
 
 # Data — raw season dumps (large binary files)
-data/
+/data/
 
 # Database (DuckDB exclusive lock; regenerated from data/)
 *.duckdb
 *.duckdb.wal
 
-# Trained models (large binaries; regenerated via run_train.py)
-models/*.txt
-models/*.ubj
-models/*.json
+# Trained models (large binaries; regenerated via training commands)
+/models/
 
 # Figures and generated reports (regenerated via report commands)
-figures/
+/figures/
 reports/*.md
 !reports/README.md
 reports/*.json
+reports/generated/
 reports/figures/
 
 # Logs and temp files
